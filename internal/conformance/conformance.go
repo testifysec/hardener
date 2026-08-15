@@ -1,0 +1,211 @@
+// Package conformance verifies observed application behavior against a
+// claimed privilege set. The same comparison serves two supply-chain party
+// classes with different sourcing and stakes:
+//
+//   - second party: the claim is the supplier's declared privilege manifest,
+//     delivered with the artifact. Observed-but-undeclared behavior is a
+//     supplier finding (noncompliance or compromise), not something to grant.
+//   - first party: the claim is a baseline committed in the application's own
+//     repo — a privilege lockfile. Observed-but-unbaselined behavior is drift,
+//     and accepting it is an explicit, reviewed baseline update.
+//
+// Third-party artifacts have no counterparty to hold to a claim, so any
+// comparison there is advisory.
+package conformance
+
+import (
+	"fmt"
+	"os"
+	"sort"
+	"strings"
+
+	"gopkg.in/yaml.v3"
+
+	"github.com/testifysec/hardener/internal/policy"
+	"github.com/testifysec/hardener/internal/profile"
+)
+
+// Observed is the normalized behavior summary extracted from a verified run.
+type Observed struct {
+	Capabilities     []string       `yaml:"capabilities,omitempty"`
+	Ports            []profile.Port `yaml:"ports,omitempty"`
+	ForeignTypes     []string       `yaml:"foreign_types,omitempty"`
+	ForeignPortBinds []string       `yaml:"foreign_port_binds,omitempty"`
+}
+
+// Finding is one observed behavior absent from the declaration.
+type Finding struct {
+	Kind     string // capability | port | port-bind | foreign-type
+	Item     string
+	Severity string // high | medium
+}
+
+func (f Finding) String() string {
+	return fmt.Sprintf("[%s] undeclared %s: %s", f.Severity, f.Kind, f.Item)
+}
+
+// Report is the outcome of comparing observed behavior to a declaration.
+type Report struct {
+	Undeclared  []Finding // observed but not declared — the violation/drift signal
+	Unexercised []string  // declared but not observed — coverage or over-declaration
+}
+
+// ExtractObserved distills the profile and the final refined rules into the
+// comparable behavior summary.
+func ExtractObserved(p *profile.Profile, rules []policy.AllowRule) Observed {
+	dom := policy.DomainType(p.Name)
+	obs := Observed{Ports: append([]profile.Port(nil), p.Ports...)}
+	capSet, foreignSet, bindSet := map[string]bool{}, map[string]bool{}, map[string]bool{}
+	for _, r := range rules {
+		switch {
+		case (r.Class == "capability" || r.Class == "capability2") && (r.Target == dom || r.Target == "self"):
+			for _, perm := range r.Perms {
+				capSet[perm] = true
+			}
+		case policy.IsOwnType(p, r.Target):
+			// access to the app's own types is the point of the policy
+		case strings.HasSuffix(r.Target, "_port_t"):
+			for _, perm := range r.Perms {
+				if perm == "name_bind" {
+					bindSet[r.Target] = true
+				}
+			}
+		default:
+			foreignSet[r.Target] = true
+		}
+	}
+	obs.Capabilities = sortedKeys(capSet)
+	obs.ForeignTypes = sortedKeys(foreignSet)
+	obs.ForeignPortBinds = sortedKeys(bindSet)
+	return obs
+}
+
+// Compare checks observed behavior against a declaration in both directions.
+func Compare(decl *profile.Declaration, obs Observed) Report {
+	rep := Report{}
+	declCaps := toSet(decl.Capabilities)
+	declTypes := toSet(decl.ForeignTypes)
+	declBinds := toSet(decl.ForeignPortBinds)
+	declPorts := map[string]bool{}
+	for _, po := range decl.Ports {
+		declPorts[portKey(po)] = true
+	}
+
+	for _, c := range obs.Capabilities {
+		if !declCaps[c] {
+			rep.Undeclared = append(rep.Undeclared, Finding{Kind: "capability", Item: c, Severity: "high"})
+		}
+	}
+	for _, po := range obs.Ports {
+		if !declPorts[portKey(po)] {
+			rep.Undeclared = append(rep.Undeclared, Finding{Kind: "port", Item: portKey(po), Severity: "high"})
+		}
+	}
+	for _, b := range obs.ForeignPortBinds {
+		if !declBinds[b] {
+			rep.Undeclared = append(rep.Undeclared, Finding{Kind: "port-bind", Item: b, Severity: "high"})
+		}
+	}
+	for _, ft := range obs.ForeignTypes {
+		if !declTypes[ft] {
+			rep.Undeclared = append(rep.Undeclared, Finding{Kind: "foreign-type", Item: ft, Severity: "medium"})
+		}
+	}
+
+	obsCaps := toSet(obs.Capabilities)
+	obsTypes := toSet(obs.ForeignTypes)
+	obsBinds := toSet(obs.ForeignPortBinds)
+	obsPorts := map[string]bool{}
+	for _, po := range obs.Ports {
+		obsPorts[portKey(po)] = true
+	}
+	for _, c := range decl.Capabilities {
+		if !obsCaps[c] {
+			rep.Unexercised = append(rep.Unexercised, "capability "+c)
+		}
+	}
+	for _, po := range decl.Ports {
+		if !obsPorts[portKey(po)] {
+			rep.Unexercised = append(rep.Unexercised, "port "+portKey(po))
+		}
+	}
+	for _, b := range decl.ForeignPortBinds {
+		if !obsBinds[b] {
+			rep.Unexercised = append(rep.Unexercised, "port-bind "+b)
+		}
+	}
+	for _, ft := range decl.ForeignTypes {
+		if !obsTypes[ft] {
+			rep.Unexercised = append(rep.Unexercised, "foreign type "+ft)
+		}
+	}
+	return rep
+}
+
+// Verdict maps a conformance report to pass/fail per party class.
+func Verdict(party string, rep Report) (fatal bool, reason string) {
+	if len(rep.Undeclared) == 0 {
+		return false, ""
+	}
+	items := make([]string, 0, len(rep.Undeclared))
+	for _, f := range rep.Undeclared {
+		items = append(items, f.Kind+" "+f.Item)
+	}
+	list := strings.Join(items, ", ")
+	switch party {
+	case "second":
+		return true, "observed behavior the supplier never declared: " + list
+	case "first":
+		return true, "privilege drift from committed baseline: " + list + " (review, then --update-baseline to accept)"
+	default: // third party: no counterparty holds a claim; advisory only
+		return false, ""
+	}
+}
+
+// SaveBaseline writes an observed behavior summary as a first-party baseline.
+func SaveBaseline(path string, obs Observed) error {
+	raw, err := yaml.Marshal(profile.Declaration{
+		Capabilities:     obs.Capabilities,
+		Ports:            obs.Ports,
+		ForeignTypes:     obs.ForeignTypes,
+		ForeignPortBinds: obs.ForeignPortBinds,
+	})
+	if err != nil {
+		return err
+	}
+	header := "# hardener privilege baseline — the app's accepted least-privilege envelope.\n" +
+		"# Regenerate deliberately with --update-baseline after reviewing any drift.\n"
+	return os.WriteFile(path, append([]byte(header), raw...), 0o644)
+}
+
+// LoadDeclaration reads a declaration/baseline file.
+func LoadDeclaration(path string) (*profile.Declaration, error) {
+	raw, err := os.ReadFile(path)
+	if err != nil {
+		return nil, err
+	}
+	var d profile.Declaration
+	if err := yaml.Unmarshal(raw, &d); err != nil {
+		return nil, fmt.Errorf("%s: %w", path, err)
+	}
+	return &d, nil
+}
+
+func toSet(items []string) map[string]bool {
+	m := map[string]bool{}
+	for _, it := range items {
+		m[it] = true
+	}
+	return m
+}
+
+func sortedKeys(m map[string]bool) []string {
+	out := make([]string, 0, len(m))
+	for k := range m {
+		out = append(out, k)
+	}
+	sort.Strings(out)
+	return out
+}
+
+func portKey(p profile.Port) string { return fmt.Sprintf("%s/%d", p.Proto, p.Port) }

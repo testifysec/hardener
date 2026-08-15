@@ -1,0 +1,41 @@
+name: splunkuf
+license: proprietary closed-source — freely distributable forwarder
+source: https://download.splunk.com (universalforwarder aarch64 RPM)
+install: |
+  curl -sLo /tmp/splunkuf.rpm 'https://download.splunk.com/products/universalforwarder/releases/9.4.2/linux/splunkforwarder-9.4.2-e9664af3d956.aarch64.rpm'
+  sudo dnf -y install /tmp/splunkuf.rpm
+unit: SplunkForwarder.service
+setup: |
+  if [ ! -f /etc/systemd/system/SplunkForwarder.service ]; then
+    sudo /opt/splunkforwarder/bin/splunk enable boot-start -systemd-managed 1 -user splunkfwd --accept-license --answer-yes --no-prompt --seed-passwd hardener123
+  fi
+  sudo chown -R splunkfwd:splunkfwd /opt/splunkforwarder
+  # Complete first-run initialization before confinement (creates var/, conf, certs).
+  sudo -u splunkfwd /opt/splunkforwarder/bin/splunk start --accept-license --answer-yes --no-prompt 2>/dev/null || true
+  sudo -u splunkfwd /opt/splunkforwarder/bin/splunk stop 2>/dev/null || true
+  # Remediation for the incompatibility hardener diagnoses on this unit:
+  # NoNewPrivileges=yes restricts SELinux to bounded transitions, so the
+  # process would stay in init_t and never enter splunkuf_t.
+  sudo mkdir -p /etc/systemd/system/SplunkForwarder.service.d
+  printf '[Service]\nNoNewPrivileges=no\n' | sudo tee /etc/systemd/system/SplunkForwarder.service.d/10-selinux-transition.conf > /dev/null
+  sudo systemctl daemon-reload
+executables:
+  - /opt/splunkforwarder/bin/splunk
+  - /opt/splunkforwarder/bin/splunkd
+paths:
+  - { path: "/opt/splunkforwarder(/.*)?", kind: content }
+exercise: |
+  # UF 9.x ships with the management port disabled; assert what a forwarder
+  # actually does: splunkd runs, stays up, and writes its own logs.
+  ok=0
+  for i in $(seq 1 120); do
+    if pgrep -x splunkd > /dev/null 2>&1 && systemctl is-active --quiet SplunkForwarder; then ok=1; break; fi
+    sleep 0.5
+  done
+  [ "$ok" = "1" ]
+  before=$(sudo stat -c %s /opt/splunkforwarder/var/log/splunk/splunkd.log)
+  sleep 5
+  systemctl is-active --quiet SplunkForwarder
+  after=$(sudo stat -c %s /opt/splunkforwarder/var/log/splunk/splunkd.log)
+  [ "$after" -ge "$before" ]
+  sudo -u splunkfwd /opt/splunkforwarder/bin/splunk status --accept-license 2>/dev/null | grep -q "splunkd is running"

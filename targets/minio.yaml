@@ -1,0 +1,36 @@
+name: minio
+license: open-source (AGPL-3.0)
+source: https://dl.min.io/server/minio/release/linux-arm64/minio
+install: |
+  curl -sLo /tmp/minio https://dl.min.io/server/minio/release/linux-arm64/minio
+  sudo mkdir -p /opt/minio/bin
+  sudo install -m 0755 /tmp/minio /opt/minio/bin/minio
+unit: minio.service
+unit_file: |
+  [Unit]
+  Description=MinIO object storage
+  After=network.target
+  [Service]
+  User=minio
+  Environment=HOME=/var/lib/minio MINIO_ROOT_USER=hardener MINIO_ROOT_PASSWORD=hardener123
+  ExecStart=/opt/minio/bin/minio server /var/lib/minio/data --address :9000 --console-address :9001
+  [Install]
+  WantedBy=multi-user.target
+setup: |
+  sudo useradd -r -s /sbin/nologin -d /var/lib/minio minio 2>/dev/null || true
+  sudo mkdir -p /var/lib/minio/data
+  sudo chown -R minio:minio /var/lib/minio
+executables:
+  - /opt/minio/bin/minio
+paths:
+  - { path: "/var/lib/minio(/.*)?", kind: var_lib }
+ports:
+  - { proto: tcp, port: 9000 }
+  - { proto: tcp, port: 9001 }
+exercise: |
+  ok=0
+  for i in $(seq 1 120); do
+    if curl -sf http://127.0.0.1:9000/minio/health/live > /dev/null 2>&1; then ok=1; break; fi
+    sleep 0.5
+  done
+  [ "$ok" = "1" ]

@@ -1,0 +1,33 @@
+name: node_exporter
+license: open-source (Apache-2.0)
+source: https://github.com/prometheus/node_exporter/releases (linux-arm64 tarball)
+install: |
+  curl -sLo /tmp/ne.tgz https://github.com/prometheus/node_exporter/releases/download/v1.9.1/node_exporter-1.9.1.linux-arm64.tar.gz
+  sudo mkdir -p /opt/node_exporter/bin
+  tar -C /tmp -xzf /tmp/ne.tgz
+  sudo install -m 0755 /tmp/node_exporter-1.9.1.linux-arm64/node_exporter /opt/node_exporter/bin/node_exporter
+unit: node_exporter.service
+unit_file: |
+  [Unit]
+  Description=Prometheus node exporter
+  After=network.target
+  [Service]
+  User=nodeexp
+  ExecStart=/opt/node_exporter/bin/node_exporter --web.listen-address=:9100
+  [Install]
+  WantedBy=multi-user.target
+setup: |
+  sudo useradd -r -s /sbin/nologin nodeexp 2>/dev/null || true
+executables:
+  - /opt/node_exporter/bin/node_exporter
+paths: []
+ports:
+  - { proto: tcp, port: 9100 }
+exercise: |
+  ok=0
+  for i in $(seq 1 60); do
+    if curl -sf http://127.0.0.1:9100/metrics > /tmp/ne.out 2>/dev/null; then ok=1; break; fi
+    sleep 0.5
+  done
+  [ "$ok" = "1" ]
+  grep -q '^node_' /tmp/ne.out

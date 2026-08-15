@@ -1,0 +1,24 @@
+name: webmin
+license: open-source (BSD-3-Clause)
+source: https://github.com/webmin/webmin/releases (noarch RPM — 25-year-old perl codebase)
+install: |
+  sudo dnf -y install https://github.com/webmin/webmin/releases/download/2.402/webmin-2.402-1.noarch.rpm
+unit: webmin.service
+setup: |
+  sudo systemctl disable --now webmin 2>/dev/null || true
+executables:
+  - /usr/libexec/webmin/miniserv.pl
+paths:
+  - { path: "/etc/webmin(/.*)?", kind: conf }
+  - { path: "/var/webmin(/.*)?", kind: var_lib }
+  - { path: "/usr/libexec/webmin(/.*)?", kind: content }
+ports:
+  - { proto: tcp, port: 10000 }
+exercise: |
+  ok=0
+  for i in $(seq 1 90); do
+    code=$(curl -sk -o /dev/null -w '%{http_code}' https://127.0.0.1:10000/ 2>/dev/null || true)
+    if [ "$code" = "200" ] || [ "$code" = "401" ]; then ok=1; break; fi
+    sleep 0.5
+  done
+  [ "$ok" = "1" ]

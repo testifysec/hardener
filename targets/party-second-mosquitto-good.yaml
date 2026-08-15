@@ -1,0 +1,47 @@
+name: mosquitto
+party: second
+declared:
+  capabilities: [setgid, setuid]
+  ports:
+    - { proto: tcp, port: 1883 }
+license: open-source (EPL-2.0)
+source: EPEL 9 RPM (mosquitto)
+install: |
+  sudo dnf -y install mosquitto
+unit: mosquitto.service
+setup: |
+  sudo tee /etc/mosquitto/mosquitto.conf > /dev/null <<'EOF'
+  listener 1883
+  allow_anonymous true
+  persistence true
+  persistence_location /var/lib/mosquitto/
+  log_dest file /var/log/mosquitto/mosquitto.log
+  EOF
+  sudo mkdir -p /var/lib/mosquitto /var/log/mosquitto
+  sudo chown mosquitto:mosquitto /var/lib/mosquitto /var/log/mosquitto
+executables:
+  - /usr/sbin/mosquitto
+paths:
+  - { path: "/etc/mosquitto(/.*)?", kind: conf }
+  - { path: "/var/lib/mosquitto(/.*)?", kind: var_lib }
+  - { path: "/var/log/mosquitto(/.*)?", kind: log }
+ports:
+  - { proto: tcp, port: 1883 }
+exercise: |
+  ok=0
+  for i in $(seq 1 50); do
+    if mosquitto_pub -h 127.0.0.1 -p 1883 -t ready -m ping 2>/dev/null; then ok=1; break; fi
+    sleep 0.2
+  done
+  [ "$ok" = "1" ]
+  # pub/sub round trip
+  msg=$(mosquitto_sub -h 127.0.0.1 -p 1883 -t t/1 -C 1 -W 5 &
+        subpid=$!
+        sleep 0.3
+        mosquitto_pub -h 127.0.0.1 -p 1883 -t t/1 -m hello-hardener
+        wait $subpid)
+  [ "$msg" = "hello-hardener" ]
+  # retained + QoS1 to force persistence activity
+  mosquitto_pub -h 127.0.0.1 -p 1883 -t t/retained -m keepme -r -q 1
+  out=$(mosquitto_sub -h 127.0.0.1 -p 1883 -t t/retained -C 1 -W 5)
+  [ "$out" = "keepme" ]

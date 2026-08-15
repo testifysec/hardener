@@ -1,0 +1,9 @@
+# hardener privilege baseline — the app's accepted least-privilege envelope.
+# Regenerate deliberately with --update-baseline after reviewing any drift.
+ports:
+    - proto: tcp
+      port: 8080
+foreign_types:
+    - sysctl_net_t
+foreign_port_binds:
+    - unreserved_port_t

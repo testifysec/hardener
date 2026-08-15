@@ -1,0 +1,44 @@
+name: nats-server
+license: open-source (Apache-2.0)
+source: https://github.com/nats-io/nats-server/releases (arm64 RPM)
+install: |
+  curl -sLo /tmp/nats.rpm https://github.com/nats-io/nats-server/releases/download/v2.12.2/nats-server-v2.12.2-arm64.rpm
+  sudo dnf -y install /tmp/nats.rpm
+unit: nats.service
+unit_file: |
+  [Unit]
+  Description=NATS server
+  After=network.target
+  [Service]
+  User=nats
+  Environment=HOME=/var/lib/nats
+  ExecStart=/usr/local/bin/nats-server -c /etc/nats/nats.conf
+  [Install]
+  WantedBy=multi-user.target
+setup: |
+  sudo useradd -r -s /sbin/nologin -d /var/lib/nats nats 2>/dev/null || true
+  sudo mkdir -p /etc/nats /var/lib/nats /var/log/nats
+  sudo tee /etc/nats/nats.conf > /dev/null <<'EOF'
+  port: 4222
+  http_port: 8222
+  jetstream { store_dir: /var/lib/nats }
+  logfile: /var/log/nats/nats.log
+  EOF
+  sudo chown -R nats:nats /var/lib/nats /var/log/nats
+executables:
+  - /usr/local/bin/nats-server
+paths:
+  - { path: "/etc/nats(/.*)?", kind: conf }
+  - { path: "/var/lib/nats(/.*)?", kind: var_lib }
+  - { path: "/var/log/nats(/.*)?", kind: log }
+ports:
+  - { proto: tcp, port: 4222 }
+  - { proto: tcp, port: 8222 }
+exercise: |
+  ok=0
+  for i in $(seq 1 60); do
+    if curl -sf http://127.0.0.1:8222/varz > /dev/null 2>&1; then ok=1; break; fi
+    sleep 0.5
+  done
+  [ "$ok" = "1" ]
+  curl -sf http://127.0.0.1:8222/healthz > /dev/null

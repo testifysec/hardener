@@ -1,0 +1,44 @@
+name: vault
+license: source-available, NOT open source (BSL 1.1) — freely distributable
+source: https://releases.hashicorp.com/vault/ (linux_arm64 zip)
+install: |
+  sudo dnf -y install unzip
+  curl -sLo /tmp/vault.zip https://releases.hashicorp.com/vault/1.20.2/vault_1.20.2_linux_arm64.zip
+  sudo mkdir -p /opt/vault/bin
+  sudo unzip -o /tmp/vault.zip vault -d /opt/vault/bin
+unit: vault.service
+unit_file: |
+  [Unit]
+  Description=HashiCorp Vault
+  After=network.target
+  [Service]
+  User=vault
+  Environment=HOME=/var/lib/vault
+  ExecStart=/opt/vault/bin/vault server -config=/etc/vault/vault.hcl
+  [Install]
+  WantedBy=multi-user.target
+setup: |
+  sudo useradd -r -s /sbin/nologin -d /var/lib/vault vault 2>/dev/null || true
+  sudo mkdir -p /etc/vault /var/lib/vault
+  sudo tee /etc/vault/vault.hcl > /dev/null <<'EOF'
+  storage "file" { path = "/var/lib/vault" }
+  listener "tcp" { address = "127.0.0.1:8200" tls_disable = true }
+  disable_mlock = true
+  ui = false
+  EOF
+  sudo chown -R vault:vault /var/lib/vault
+executables:
+  - /opt/vault/bin/vault
+paths:
+  - { path: "/etc/vault(/.*)?", kind: conf }
+  - { path: "/var/lib/vault(/.*)?", kind: var_lib }
+ports:
+  - { proto: tcp, port: 8200 }
+exercise: |
+  ok=0
+  for i in $(seq 1 60); do
+    body=$(curl -s http://127.0.0.1:8200/v1/sys/seal-status 2>/dev/null || true)
+    if echo "$body" | grep -q initialized; then ok=1; break; fi
+    sleep 0.5
+  done
+  [ "$ok" = "1" ]

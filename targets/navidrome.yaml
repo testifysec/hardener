@@ -1,0 +1,39 @@
+name: navidrome
+license: open-source (GPL-3.0)
+source: https://github.com/navidrome/navidrome/releases (linux_arm64 tarball)
+install: |
+  curl -sLo /tmp/nd.tgz https://github.com/navidrome/navidrome/releases/download/v0.58.0/navidrome_0.58.0_linux_arm64.tar.gz
+  sudo mkdir -p /opt/navidrome/bin
+  sudo tar -C /opt/navidrome/bin -xzf /tmp/nd.tgz navidrome
+unit: navidrome.service
+unit_file: |
+  [Unit]
+  Description=Navidrome music server
+  After=network.target
+  [Service]
+  User=navidrome
+  Environment=HOME=/var/lib/navidrome ND_MUSICFOLDER=/var/lib/navidrome/music ND_DATAFOLDER=/var/lib/navidrome/data ND_PORT=4533 ND_ADDRESS=127.0.0.1
+  ExecStart=/opt/navidrome/bin/navidrome
+  [Install]
+  WantedBy=multi-user.target
+setup: |
+  sudo useradd -r -s /sbin/nologin -d /var/lib/navidrome navidrome 2>/dev/null || true
+  sudo mkdir -p /var/lib/navidrome/music /var/lib/navidrome/data
+  sudo chown -R navidrome:navidrome /var/lib/navidrome
+executables:
+  - /opt/navidrome/bin/navidrome
+paths:
+  - { path: "/var/lib/navidrome(/.*)?", kind: var_lib }
+ports:
+  - { proto: tcp, port: 4533 }
+exercise: |
+  ok=0
+  for i in $(seq 1 120); do
+    code=$(curl -s -o /dev/null -w '%{http_code}' http://127.0.0.1:4533/ping 2>/dev/null || true)
+    if [ "$code" = "200" ]; then ok=1; break; fi
+    sleep 0.5
+  done
+  [ "$ok" = "1" ]
+  # exercise the app API surface too
+  code=$(curl -s -o /dev/null -w '%{http_code}' http://127.0.0.1:4533/app/)
+  [ "$code" = "200" ]

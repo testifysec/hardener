@@ -1,0 +1,40 @@
+name: plex
+license: proprietary closed-source — freely distributable installer
+source: https://plex.tv/api/downloads/5.json (aarch64 ships only as .deb — payload extracted onto RHEL, the classic foreign-artifact case)
+install: |
+  url=$(curl -s 'https://plex.tv/api/downloads/5.json' | python3 -c "
+  import sys,json
+  d=json.load(sys.stdin)
+  print([r['url'] for c in d['computer'].values() for r in c.get('releases',[]) if 'arm64' in r['url'] or 'aarch64' in r['url']][0])")
+  curl -sLo /tmp/plex.deb "$url"
+  sudo dnf -y install binutils xz zstd
+  rm -rf /tmp/plexx && mkdir -p /tmp/plexx && cd /tmp/plexx
+  ar x /tmp/plex.deb
+  sudo tar -C / -xf data.tar.*
+unit: plexmediaserver.service
+setup: |
+  # The deb postinst never ran (payload extraction only): do its work.
+  sudo groupadd -r plex 2>/dev/null || true
+  sudo useradd -r -g plex -s /sbin/nologin -d /var/lib/plexmediaserver plex 2>/dev/null || true
+  sudo install -m 0644 "/usr/lib/plexmediaserver/lib/plexmediaserver.service" /etc/systemd/system/plexmediaserver.service
+  sudo mkdir -p "/var/lib/plexmediaserver/Library/Application Support"
+  sudo chown -R plex:plex /var/lib/plexmediaserver
+  sudo systemctl disable --now plexmediaserver 2>/dev/null || true
+executables:
+  - "/usr/lib/plexmediaserver/Plex Media Server"
+  - "/usr/lib/plexmediaserver/Plex Script Host"
+  - "/usr/lib/plexmediaserver/Plex Media Scanner"
+  - "/usr/lib/plexmediaserver/Plex Tuner Service"
+paths:
+  - { path: "/usr/lib/plexmediaserver(/.*)?", kind: content }
+  - { path: "/var/lib/plexmediaserver(/.*)?", kind: var_lib }
+ports:
+  - { proto: tcp, port: 32400 }
+exercise: |
+  ok=0
+  for i in $(seq 1 180); do
+    if curl -sf http://127.0.0.1:32400/identity > /tmp/plex.out 2>/dev/null; then ok=1; break; fi
+    sleep 0.5
+  done
+  [ "$ok" = "1" ]
+  grep -q machineIdentifier /tmp/plex.out

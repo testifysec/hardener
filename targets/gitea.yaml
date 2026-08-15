@@ -1,0 +1,57 @@
+name: gitea
+license: open-source (MIT)
+source: https://dl.gitea.com/gitea/ (linux-arm64 binary)
+install: |
+  sudo dnf -y install git
+  curl -sLo /tmp/gitea https://dl.gitea.com/gitea/1.24.6/gitea-1.24.6-linux-arm64
+  sudo mkdir -p /opt/gitea/bin
+  sudo install -m 0755 /tmp/gitea /opt/gitea/bin/gitea
+unit: gitea.service
+unit_file: |
+  [Unit]
+  Description=Gitea
+  After=network.target
+  [Service]
+  User=gitea
+  Environment=HOME=/var/lib/gitea
+  ExecStart=/opt/gitea/bin/gitea web --config /etc/gitea/app.ini
+  [Install]
+  WantedBy=multi-user.target
+setup: |
+  sudo useradd -r -m -d /var/lib/gitea -s /sbin/nologin gitea 2>/dev/null || true
+  sudo mkdir -p /etc/gitea /var/lib/gitea /var/log/gitea
+  sudo tee /etc/gitea/app.ini > /dev/null <<'EOF'
+  RUN_USER = gitea
+  RUN_MODE = prod
+  WORK_PATH = /var/lib/gitea
+  [server]
+  HTTP_PORT = 3000
+  DISABLE_SSH = true
+  OFFLINE_MODE = true
+  [database]
+  DB_TYPE = sqlite3
+  PATH = /var/lib/gitea/gitea.db
+  [security]
+  INSTALL_LOCK = true
+  [log]
+  MODE = file
+  ROOT_PATH = /var/log/gitea
+  EOF
+  sudo chown -R gitea:gitea /var/lib/gitea /var/log/gitea /etc/gitea
+executables:
+  - /opt/gitea/bin/gitea
+paths:
+  - { path: "/etc/gitea(/.*)?", kind: conf }
+  - { path: "/var/lib/gitea(/.*)?", kind: var_lib }
+  - { path: "/var/log/gitea(/.*)?", kind: log }
+ports:
+  - { proto: tcp, port: 3000 }
+exercise: |
+  ok=0
+  for i in $(seq 1 120); do
+    if curl -sf http://127.0.0.1:3000/api/healthz > /dev/null 2>&1; then ok=1; break; fi
+    sleep 0.5
+  done
+  [ "$ok" = "1" ]
+  code=$(curl -s -o /dev/null -w '%{http_code}' http://127.0.0.1:3000/)
+  [ "$code" = "200" ]

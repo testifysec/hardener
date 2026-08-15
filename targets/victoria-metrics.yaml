@@ -1,0 +1,37 @@
+name: victoria-metrics
+license: open-source (Apache-2.0)
+source: https://github.com/VictoriaMetrics/VictoriaMetrics/releases (linux-arm64 tarball)
+install: |
+  curl -sLo /tmp/vm.tgz https://github.com/VictoriaMetrics/VictoriaMetrics/releases/download/v1.126.0/victoria-metrics-linux-arm64-v1.126.0.tar.gz
+  sudo mkdir -p /opt/victoria-metrics/bin
+  sudo tar -C /opt/victoria-metrics/bin -xzf /tmp/vm.tgz
+unit: victoria-metrics.service
+unit_file: |
+  [Unit]
+  Description=VictoriaMetrics TSDB
+  After=network.target
+  [Service]
+  User=victoria
+  Environment=HOME=/var/lib/victoria-metrics
+  ExecStart=/opt/victoria-metrics/bin/victoria-metrics-prod -storageDataPath=/var/lib/victoria-metrics -httpListenAddr=127.0.0.1:8428
+  [Install]
+  WantedBy=multi-user.target
+setup: |
+  sudo useradd -r -s /sbin/nologin -d /var/lib/victoria-metrics victoria 2>/dev/null || true
+  sudo mkdir -p /var/lib/victoria-metrics
+  sudo chown -R victoria:victoria /var/lib/victoria-metrics
+executables:
+  - /opt/victoria-metrics/bin/victoria-metrics-prod
+paths:
+  - { path: "/var/lib/victoria-metrics(/.*)?", kind: var_lib }
+ports:
+  - { proto: tcp, port: 8428 }
+exercise: |
+  ok=0
+  for i in $(seq 1 60); do
+    if curl -sf http://127.0.0.1:8428/health > /dev/null 2>&1; then ok=1; break; fi
+    sleep 0.5
+  done
+  [ "$ok" = "1" ]
+  curl -s --data-binary 'hardener_metric{src="test"} 42' http://127.0.0.1:8428/api/v1/import/prometheus
+  curl -sf 'http://127.0.0.1:8428/api/v1/export?match=hardener_metric' > /dev/null

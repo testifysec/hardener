@@ -1,0 +1,26 @@
+name: emby
+license: proprietary closed-source core — freely distributable
+source: https://github.com/MediaBrowser/Emby.Releases (aarch64 RPM)
+install: |
+  sudo dnf -y install https://github.com/MediaBrowser/Emby.Releases/releases/download/4.8.11.0/emby-server-rpm_4.8.11.0_aarch64.rpm
+unit: emby-server.service
+setup: |
+  sudo systemctl disable --now emby-server 2>/dev/null || true
+executables:
+  # The unit's ExecStart is the sh wrapper, not the binary; hardener derives it
+  # from the unit as well, but naming it here keeps the manifest honest.
+  - /opt/emby-server/bin/emby-server
+  - /opt/emby-server/system/EmbyServer
+paths:
+  - { path: "/opt/emby-server(/.*)?", kind: content }
+  - { path: "/var/lib/emby(/.*)?", kind: var_lib }
+ports:
+  - { proto: tcp, port: 8096 }
+exercise: |
+  ok=0
+  for i in $(seq 1 240); do
+    if curl -sf http://127.0.0.1:8096/System/Info/Public > /tmp/emby.out 2>/dev/null; then ok=1; break; fi
+    sleep 0.5
+  done
+  [ "$ok" = "1" ]
+  grep -qi version /tmp/emby.out

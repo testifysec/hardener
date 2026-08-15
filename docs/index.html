@@ -1,0 +1,211 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>hardener — SELinux confinement, compiled from behavior</title>
+<meta name="description" content="Give it a legacy RPM, tarball, or vendor binary. Get back a least-privilege SELinux policy RPM and a machine-checked verification — proven under Enforcing.">
+<style>
+  :root {
+    --ground: #f6f7f9;
+    --panel: #fdfdfe;
+    --ink: #1c2128;
+    --muted: #5b6570;
+    --line: #d9dee5;
+    --accent: #3d4f8a;
+    --accent-ink: #33427a;
+    --pass: #1d6b3f;
+    --pass-bg: #e3f0e7;
+    --warn: #8a5a12;
+    --warn-bg: #f5ecd9;
+    --fail: #9c3232;
+    --fail-bg: #f5e2e2;
+    --code-bg: #eceef2;
+    --term-bg: #101425;
+    --term-ink: #c9d4df;
+  }
+  @media (prefers-color-scheme: dark) {
+    :root {
+      --ground: #14171c; --panel: #1b1f26; --ink: #e4e8ee; --muted: #96a0ac;
+      --line: #303844; --accent: #93a4dd; --accent-ink: #a8b7e8;
+      --pass: #6fbf8f; --pass-bg: #1c2e23; --warn: #d8ab5a; --warn-bg: #302818;
+      --fail: #d88; --fail-bg: #331f1f; --code-bg: #23272f;
+    }
+  }
+  * { box-sizing: border-box; }
+  body {
+    background: var(--ground); color: var(--ink);
+    font-family: system-ui, -apple-system, "Segoe UI", sans-serif;
+    line-height: 1.55; margin: 0; padding: 0 20px 80px;
+  }
+  main { max-width: 880px; margin: 0 auto; }
+  .prose { max-width: 700px; }
+  code, .mono { font-family: ui-monospace, "SF Mono", "Cascadia Code", Menlo, Consolas, monospace; font-size: 0.86em; }
+  code { background: var(--code-bg); padding: 1px 5px; border-radius: 3px; }
+  a { color: var(--accent-ink); }
+  .eyebrow {
+    font-family: ui-monospace, Menlo, Consolas, monospace; font-size: 12px;
+    letter-spacing: 0.14em; text-transform: uppercase; color: var(--accent); margin: 56px 0 6px;
+  }
+  h1 {
+    font-family: ui-serif, Charter, Georgia, serif;
+    font-size: clamp(32px, 5.5vw, 46px); line-height: 1.1; text-wrap: balance;
+    margin: 10px 0 12px; letter-spacing: -0.01em;
+  }
+  h2 { font-family: ui-serif, Charter, Georgia, serif; font-size: 25px; margin: 4px 0 14px; text-wrap: balance; }
+  p { margin: 10px 0; }
+  .lede { font-size: 18px; }
+  header { padding-top: 64px; }
+  .links { display: flex; gap: 10px; flex-wrap: wrap; margin: 22px 0 0; }
+  .btn {
+    display: inline-block; padding: 9px 16px; border-radius: 6px; text-decoration: none;
+    font-size: 14.5px; font-weight: 600; border: 1px solid var(--line);
+  }
+  .btn.primary { background: var(--accent); color: var(--ground); border-color: var(--accent); }
+  .btn.ghost { color: var(--accent-ink); background: var(--panel); }
+  .term {
+    background: var(--term-bg); border-radius: 8px; padding: 16px 18px; margin: 26px 0;
+    font-family: ui-monospace, Menlo, Consolas, monospace; font-size: 13px; line-height: 1.65;
+    color: var(--term-ink); overflow-x: auto;
+  }
+  .term .p { color: #7f8ea0; } .term .ok { color: #35c98a; font-weight: 700; }
+  .term .hi { color: #e9a13b; } .term .bad { color: #e07777; }
+  .stats {
+    display: grid; grid-template-columns: repeat(auto-fit, minmax(150px, 1fr));
+    gap: 1px; background: var(--line); border: 1px solid var(--line); margin: 34px 0 0;
+  }
+  .stat { background: var(--panel); padding: 14px 16px; }
+  .stat .n { font-family: ui-monospace, Menlo, Consolas, monospace; font-variant-numeric: tabular-nums; font-size: 27px; font-weight: 600; }
+  .stat .n.ok { color: var(--pass); }
+  .stat .l { font-size: 12.5px; color: var(--muted); margin-top: 2px; }
+  .flow { display: flex; flex-wrap: wrap; gap: 8px; margin: 18px 0; }
+  .flow .step {
+    background: var(--panel); border: 1px solid var(--line); padding: 8px 12px;
+    font-size: 13px; display: flex; align-items: baseline; gap: 8px;
+  }
+  .flow .step .k { font-family: ui-monospace, Menlo, Consolas, monospace; font-size: 11px; color: var(--accent); font-weight: 600; }
+  .defs { display: grid; grid-template-columns: 1fr; gap: 12px; margin: 18px 0; }
+  @media (min-width: 700px) { .defs { grid-template-columns: 1fr 1fr; } }
+  .def { background: var(--panel); border: 1px solid var(--line); border-left: 3px solid var(--fail); padding: 12px 16px; }
+  .def h4 { margin: 0 0 4px; font-size: 14.5px; }
+  .def h4 .who { font-family: ui-monospace, Menlo, Consolas, monospace; font-size: 11.5px; color: var(--accent); font-weight: 600; margin-left: 4px; }
+  .def p { margin: 4px 0; font-size: 13.5px; color: var(--muted); }
+  .gate { display: flex; gap: 10px; align-items: baseline; margin: 8px 0; }
+  .gate .chk { color: var(--pass); font-weight: 700; }
+  .callout { border: 1px solid var(--line); border-left: 3px solid var(--accent); background: var(--panel); padding: 12px 18px; margin: 20px 0; }
+  .callout p { font-size: 14.5px; }
+  .party { display: grid; grid-template-columns: 1fr; gap: 12px; margin: 18px 0; }
+  @media (min-width: 760px) { .party { grid-template-columns: 1fr 1fr 1fr; } }
+  .pcard { background: var(--panel); border: 1px solid var(--line); border-top: 3px solid var(--accent); padding: 12px 16px; }
+  .pcard h4 { margin: 0 0 6px; font-size: 15px; }
+  .pcard p { font-size: 13.5px; color: var(--muted); margin: 4px 0; }
+  .pcard .verdict { font-size: 13px; color: var(--ink); }
+  footer { margin-top: 72px; font-size: 12.5px; color: var(--muted); border-top: 1px solid var(--line); padding-top: 14px; display: flex; justify-content: space-between; flex-wrap: wrap; gap: 8px; }
+  ul { padding-left: 22px; margin: 10px 0; }
+  li { margin: 5px 0; }
+</style>
+</head>
+<body>
+<main>
+<header>
+  <div class="eyebrow" style="margin-top:0">testifysec / hardener · Apache-2.0</div>
+  <h1>SELinux confinement, compiled from behavior. Proven under Enforcing.</h1>
+  <p class="lede prose">Give <span class="mono">hardener</span> a legacy RPM, a tarball, or a vendor
+  binary — no source required. It derives the least privilege the application actually needs, generates a
+  proper SELinux policy, packages it as an installable RPM, and verifies the app still works with
+  enforcement on. The alternative it replaces is <code>setenforce 0</code>.</p>
+  <div class="links">
+    <a class="btn primary" href="https://github.com/testifysec/hardener">GitHub</a>
+    <a class="btn ghost" href="whitepaper.html">White paper</a>
+    <a class="btn ghost" href="https://github.com/testifysec/hardener/blob/main/skills/manifest-author/SKILL.md">Manifest skill</a>
+  </div>
+
+  <div class="term">
+<div><span class="p">$</span> hardener run --vm selinux-verifier --out reports targets/plex.yaml</div>
+<div>plex: 84 denials observed → 52 rules · 3 flagged for review · relabels: 0</div>
+<div>plex: enforcing verification — domain <span class="hi">system_u:system_r:plex_t:s0</span> · workload <span class="ok">PASS</span> · residual denials 0</div>
+<div>plex: static cross-check — 6/6 predicted behaviors observed · coverage gaps 0</div>
+<div>plex: <span class="ok">✔ PASS</span> → plex-selinux-1.0.0.rpm + verdict attestation</div>
+  </div>
+
+  <div class="stats">
+    <div class="stat"><div class="n ok">13 / 13</div><div class="l">corpus apps verified Enforcing — incl. Plex, Emby, Splunk UF</div></div>
+    <div class="stat"><div class="n">286 → 159</div><div class="l">denials distilled into least-privilege rules</div></div>
+    <div class="stat"><div class="n">15</div><div class="l">privileged rules routed to human review</div></div>
+    <div class="stat"><div class="n">0</div><div class="l">residual denials at pass</div></div>
+  </div>
+</header>
+
+<div class="eyebrow">How it works</div>
+<h2>Observe, classify, enforce, prove</h2>
+<div class="flow">
+  <div class="step"><span class="k">1</span>analyze artifact</div>
+  <div class="step"><span class="k">2</span>synthesize .te/.fc</div>
+  <div class="step"><span class="k">3</span>observe in permissive domain</div>
+  <div class="step"><span class="k">4</span>refine: relabel vs allow vs flag</div>
+  <div class="step"><span class="k">5</span>enforce + verify</div>
+  <div class="step"><span class="k">6</span>package RPM + verdict</div>
+</div>
+<p class="prose">The refine step is what separates this from <code>audit2allow</code>: a denial whose path
+falls under the app's own file-context claims but carries a generic label is a <em>labeling</em> problem —
+fixed with <code>restorecon</code>, never an allow rule. Privileged capabilities, sensitive targets
+(<code>shadow_t</code>), and broad shared types (<code>var_log_t</code>, <code>tmp_t</code>) are never
+granted silently; they route to a review gate.</p>
+
+<h2 style="margin-top:36px">What a pass proves</h2>
+<div class="gate"><span class="chk">✓</span><span>The workload succeeds with the domain <strong>Enforcing</strong> — real protocol round-trips, not process liveness.</span></div>
+<div class="gate"><span class="chk">✓</span><span>The process provably runs in the generated domain (<code>ps -o label=</code>) — a failed transition cannot fake a pass with a clean log.</span></div>
+<div class="gate"><span class="chk">✓</span><span>Zero residual denials, after bounded late-path refinement.</span></div>
+<div class="gate"><span class="chk">✓</span><span>Static least-privilege negatives hold via <code>sesearch</code>; accepted exceptions are named in the verdict, never hidden.</span></div>
+<div class="callout prose"><p><strong>Coverage honesty:</strong> static import analysis predicts what the
+binary <em>can</em> do (bind, drop privileges, exec); anything the exercise never drove is reported as a
+coverage gap instead of assumed safe.</p></div>
+
+<div class="eyebrow">Field-tested</div>
+<h2>Six ways real vendor software breaks naive policy generation</h2>
+<p class="prose">Each of these was found on a real artifact, and each is diagnosed by name instead of
+surfacing as a mystery:</p>
+<div class="defs">
+  <div class="def"><h4>Symlinked entrypoint<span class="who">nats-server</span></h4><p>The resolved inode decides the transition. Label the symlink and the service runs unconfined while looking healthy.</p></div>
+  <div class="def"><h4>Mislabeled entrypoint<span class="who">emby</span></h4><p>The service can never start — with zero denials in its own domain. Caught by watching denials against owned types from every source domain.</p></div>
+  <div class="def"><h4>NoNewPrivileges unit<span class="who">splunk</span></h4><p>The kernel permits only bounded transitions; no policy fixes it. Diagnosed up front with the systemd remediation named.</p></div>
+  <div class="def"><h4>Base-policy collision<span class="who">webmin</span></h4><p>Redeclaring a path the distro claims kills the whole module. Detected, deferred, reported.</p></div>
+  <div class="def"><h4>Interpreter ExecStart<span class="who">plex</span></h4><p><code>ExecStart=/bin/sh -c</code> — labeling the shell would confine the entire OS. Guarded; the transition fires on the exec'd app binary.</p></div>
+  <div class="def"><h4>App bug ≠ policy bug<span class="who">all</span></h4><p>Failing in a permissive domain with zero denials is not SELinux. One round, honest diagnosis, stop.</p></div>
+</div>
+
+<div class="eyebrow">Supply chain</div>
+<h2>One pipeline, three contracts</h2>
+<div class="party">
+  <div class="pcard"><h4>Third party</h4><p>COTS/OSS — no counterparty holds a claim.</p><p class="verdict">Observation is discovery; privileged rules go to review.</p></div>
+  <div class="pcard"><h4>Second party</h4><p>Supplier deliverable with a privilege declaration.</p><p class="verdict">Observed-but-undeclared behavior <strong>fails acceptance</strong> — noncompliance or compromise.</p></div>
+  <div class="pcard"><h4>First party</h4><p>Your code, with a committed privilege baseline.</p><p class="verdict">Drift <strong>fails the build</strong> until reviewed (<code>--update-baseline</code>).</p></div>
+</div>
+<div class="term">
+<div><span class="p">$</span> hardener run --vm verifier targets/party-first-caddy-v2.yaml</div>
+<div><span class="bad">caddy: FAIL</span> — privilege drift from committed baseline: <span class="hi">port-bind unreserved_port_t</span></div>
+<div><span class="p"># a developer added a listener; the build fails until someone reviews it</span></div>
+</div>
+
+<div class="eyebrow">Evidence</div>
+<h2>The verdict is an attestation</h2>
+<p class="prose">Every run emits the verdict as an in-toto statement: subjects are the policy RPM and
+<code>.te</code>/<code>.fc</code> by digest; the predicate carries every gate, flagged rule, conformance
+outcome, coverage gap, and the exact verifier baseline. Signing (ed25519 DSSE) and Archivista upload are
+built in and <strong>strictly optional</strong> — both off by default. For keyless signing, timestamps, and
+full execution provenance, wrap the run with <a href="https://testifysec.com">CI/Lock</a>; the two compose.</p>
+
+<div class="eyebrow">Onboarding</div>
+<h2>Manifests are meant to be written by AI agents</h2>
+<p class="prose">The one input that takes judgment is the workload manifest — install, start, exercise,
+stop. The repo ships a <a href="https://github.com/testifysec/hardener/blob/main/skills/manifest-author/SKILL.md">skill</a>
+that teaches an agent to inspect your artifact, write a scenario-based exercise, and iterate against the
+report's coverage gaps. Point your agent at an artifact; review the manifest like you'd review a test plan.</p>
+
+<footer>
+  <div>© TestifySec · Apache-2.0 · <a href="https://github.com/testifysec/hardener">github.com/testifysec/hardener</a></div>
+  <div class="mono">setenforce 1</div>
+</footer>
+</main>
+</body>
+</html>

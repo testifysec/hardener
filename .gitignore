@@ -1,0 +1,9 @@
+bin/
+dist/
+*.log
+reports-party/
+reports-wit/
+gdoc-check*
+mcp-go-debugger.log
+one-pager-hardener.html
+whitepaper-continuous-confinement.html

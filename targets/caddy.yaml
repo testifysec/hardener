@@ -1,0 +1,40 @@
+name: caddy
+license: open-source (Apache-2.0)
+source: https://github.com/caddyserver/caddy/releases (linux_arm64 tarball)
+install: |
+  curl -sLo /tmp/caddy.tgz https://github.com/caddyserver/caddy/releases/download/v2.10.2/caddy_2.10.2_linux_arm64.tar.gz
+  sudo mkdir -p /opt/caddy/bin
+  sudo tar -C /opt/caddy/bin -xzf /tmp/caddy.tgz caddy
+unit: caddy.service
+unit_file: |
+  [Unit]
+  Description=Caddy web server
+  After=network.target
+  [Service]
+  User=caddy
+  Environment=XDG_DATA_HOME=/var/lib/caddy XDG_CONFIG_HOME=/var/lib/caddy HOME=/var/lib/caddy
+  ExecStart=/opt/caddy/bin/caddy run --config /etc/caddy/Caddyfile --adapter caddyfile
+  [Install]
+  WantedBy=multi-user.target
+setup: |
+  sudo useradd -r -s /sbin/nologin -d /var/lib/caddy caddy 2>/dev/null || true
+  sudo mkdir -p /etc/caddy /var/lib/caddy/site /var/log/caddy
+  printf '{\n\tadmin off\n}\n:8080 {\n\troot * /var/lib/caddy/site\n\tfile_server\n}\n' | sudo tee /etc/caddy/Caddyfile > /dev/null
+  echo caddy-hardener-ok | sudo tee /var/lib/caddy/site/index.html > /dev/null
+  sudo chown -R caddy:caddy /var/lib/caddy /var/log/caddy
+executables:
+  - /opt/caddy/bin/caddy
+paths:
+  - { path: "/etc/caddy(/.*)?", kind: conf }
+  - { path: "/var/lib/caddy(/.*)?", kind: var_lib }
+  - { path: "/var/log/caddy(/.*)?", kind: log }
+ports:
+  - { proto: tcp, port: 8080 }
+exercise: |
+  ok=0
+  for i in $(seq 1 60); do
+    if curl -sf http://127.0.0.1:8080/ > /tmp/caddy.out 2>/dev/null; then ok=1; break; fi
+    sleep 0.5
+  done
+  [ "$ok" = "1" ]
+  grep -q caddy-hardener-ok /tmp/caddy.out

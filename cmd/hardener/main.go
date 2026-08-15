@@ -1,0 +1,197 @@
+// hardener: automated SELinux policy compiler for legacy artifacts.
+//
+// Usage:
+//
+//	hardener run --vm <lima-instance> --out <report-dir> <target.yaml>...
+package main
+
+import (
+	"encoding/json"
+	"flag"
+	"fmt"
+	"log"
+	"os"
+	"path/filepath"
+	"strings"
+
+	"github.com/testifysec/hardener/internal/archivista"
+	"github.com/testifysec/hardener/internal/conformance"
+	"github.com/testifysec/hardener/internal/pipeline"
+	"github.com/testifysec/hardener/internal/profile"
+	"github.com/testifysec/hardener/internal/signing"
+	"github.com/testifysec/hardener/internal/target"
+	"github.com/testifysec/hardener/internal/verdict"
+	"github.com/testifysec/hardener/internal/vm"
+)
+
+// checkConformance applies the supply-chain party contract to a verified run.
+//   - second party: observed behavior must stay inside the supplier's
+//     declaration; anything undeclared is a supplier finding and fails the run.
+//   - first party: observed behavior must match the committed baseline;
+//     drift fails the run until a human reviews and updates the baseline.
+//   - third party: no counterparty holds a claim; a declared block, if present,
+//     is compared for advisory reporting only.
+func checkConformance(res *pipeline.Result, t *target.Target, manifestPath string, updateBaseline bool, logf func(string, ...any)) {
+	res.Party = t.Party
+	if res.FinalProfile == nil || res.FailureReason != "" {
+		return // the run never got far enough to observe behavior
+	}
+	obs := conformance.ExtractObserved(res.FinalProfile, res.FinalRules)
+
+	var decl *profile.Declaration
+	baseline := t.Baseline
+	switch t.Party {
+	case "first":
+		if baseline == "" {
+			baseline = filepath.Join(filepath.Dir(manifestPath), "baselines", t.Name+".yaml")
+		}
+		loaded, err := conformance.LoadDeclaration(baseline)
+		switch {
+		case os.IsNotExist(err) && updateBaseline:
+			_ = os.MkdirAll(filepath.Dir(baseline), 0o755)
+			if err := conformance.SaveBaseline(baseline, obs); err != nil {
+				res.ConformanceFatal = "cannot write baseline: " + err.Error()
+				return
+			}
+			logf("[%s] first-party baseline created: %s", t.Name, baseline)
+			return
+		case os.IsNotExist(err):
+			res.ConformanceFatal = "no committed baseline at " + baseline + " — review the report, then run with --update-baseline to create it"
+			return
+		case err != nil:
+			res.ConformanceFatal = "baseline unreadable: " + err.Error()
+			return
+		}
+		decl = loaded
+	case "second":
+		decl = t.Declared
+	default:
+		if t.Declared == nil {
+			return
+		}
+		decl = t.Declared // advisory comparison for third party
+	}
+
+	rep := conformance.Compare(decl, obs)
+	for _, f := range rep.Undeclared {
+		res.ConformanceUndecl = append(res.ConformanceUndecl, f.String())
+	}
+	res.ConformanceUnexer = rep.Unexercised
+	fatal, reason := conformance.Verdict(t.Party, rep)
+	if fatal && t.Party == "first" && updateBaseline {
+		// A human ran with --update-baseline: that IS the review acceptance.
+		if err := conformance.SaveBaseline(baseline, obs); err != nil {
+			res.ConformanceFatal = "cannot update baseline: " + err.Error()
+			return
+		}
+		logf("[%s] baseline updated to accept drift: %s", t.Name, baseline)
+		return
+	}
+	if fatal {
+		res.ConformanceFatal = reason
+		logf("[%s] conformance: %s", t.Name, reason)
+	}
+}
+
+func main() {
+	if len(os.Args) < 2 || os.Args[1] != "run" {
+		fmt.Fprintln(os.Stderr, "usage: hardener run --vm <lima-instance> --out <dir> <target.yaml>...")
+		os.Exit(2)
+	}
+	fs := flag.NewFlagSet("run", flag.ExitOnError)
+	vmName := fs.String("vm", "selinux-verifier", "Lima instance name")
+	outDir := fs.String("out", "reports", "report output directory")
+	rounds := fs.Int("rounds", 5, "max permissive observation rounds")
+	acceptFlagged := fs.Bool("accept-flagged", false, "auto-apply flagged rules (still reported)")
+	updateBaseline := fs.Bool("update-baseline", false, "first-party targets: write the observed behavior as the new baseline")
+	signKey := fs.String("sign-key", "", "optional: ed25519 PKCS#8 PEM key; signs each verdict into a DSSE envelope (<target>.verdict.dsse.json)")
+	archivistaURL := fs.String("archivista-url", "", "optional: Archivista base URL; uploads the signed envelope (requires --sign-key)")
+	_ = fs.Parse(os.Args[2:])
+	if fs.NArg() == 0 {
+		log.Fatal("no target manifests given")
+	}
+	if err := os.MkdirAll(*outDir, 0o755); err != nil {
+		log.Fatal(err)
+	}
+
+	runner := &vm.Lima{Instance: *vmName}
+	failures := 0
+	for _, path := range fs.Args() {
+		t, err := target.Load(path)
+		if err != nil {
+			log.Printf("SKIP %s: %v", path, err)
+			failures++
+			continue
+		}
+		log.Printf("=== %s ===", t.Name)
+		res := pipeline.Run(runner, t, pipeline.Options{
+			MaxRounds:     *rounds,
+			AcceptFlagged: *acceptFlagged,
+			Log:           log.Printf,
+		})
+		checkConformance(res, t, path, *updateBaseline, log.Printf)
+		report := pipeline.RenderReport(res)
+		base := strings.TrimSuffix(filepath.Base(path), ".yaml")
+		out := filepath.Join(*outDir, base+".md")
+		if err := os.WriteFile(out, []byte(report), 0o644); err != nil {
+			log.Fatal(err)
+		}
+
+		// The verdict as an attestation: an unsigned in-toto statement, ready
+		// for the factory's signing rails (cilock run -- hardener run ...).
+		var subjects []verdict.Subject
+		if res.RPMPath != "" && res.RPMSHA256 != "" {
+			subjects = append(subjects, verdict.Subject{Name: verdict.RPMSubjectName(res.RPMPath), SHA256: res.RPMSHA256})
+		}
+		env := verdict.Env{
+			Distro: res.VerifierEnv["distro"], Kernel: res.VerifierEnv["kernel"],
+			Mode: res.VerifierEnv["selinuxMode"], PolicyPackage: res.VerifierEnv["policyPackage"],
+		}
+		stJSON, err := json.MarshalIndent(verdict.Build(res, env, subjects), "", "  ")
+		if err != nil {
+			log.Fatal(err)
+		}
+		vout := filepath.Join(*outDir, base+".verdict.json")
+		if err := os.WriteFile(vout, stJSON, 0o644); err != nil {
+			log.Fatal(err)
+		}
+
+		// Optional signing and optional upload — both off unless asked for.
+		if *signKey != "" {
+			env2, err := signing.SignFile(*signKey, "application/vnd.in-toto+json", stJSON)
+			if err != nil {
+				log.Fatalf("sign verdict: %v", err)
+			}
+			envJSON, _ := json.MarshalIndent(env2, "", "  ")
+			dsseOut := filepath.Join(*outDir, base+".verdict.dsse.json")
+			if err := os.WriteFile(dsseOut, envJSON, 0o644); err != nil {
+				log.Fatal(err)
+			}
+			if *archivistaURL != "" {
+				gitoid, err := archivista.Upload(*archivistaURL, env2)
+				if err != nil {
+					log.Fatalf("%v", err)
+				}
+				log.Printf("[%s] verdict attestation stored: %s (gitoid %s)", t.Name, *archivistaURL, gitoid)
+			}
+		} else if *archivistaURL != "" {
+			log.Fatal("--archivista-url requires --sign-key: unsigned attestations are not worth storing")
+		}
+		if res.FailureReason != "" || !res.EnforceOK || res.ConformanceFatal != "" {
+			failures++
+			why := res.FailureReason
+			if why == "" {
+				why = res.ConformanceFatal
+			}
+			if why == "" {
+				why = "enforcing verification failed"
+			}
+			log.Printf("=== %s: FAIL (%s) → %s", t.Name, why, out)
+		} else {
+			log.Printf("=== %s: PASS → %s", t.Name, out)
+		}
+	}
+	if failures > 0 {
+		os.Exit(1)
+	}
+}
