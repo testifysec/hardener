@@ -68,7 +68,12 @@ install -D -m 0644 %%{SOURCE0} %%{buildroot}%%{_datadir}/selinux/packages/%[1]s.
 install -D -m 0644 %%{SOURCE1} %%{buildroot}%%{_datadir}/selinux/hardener/%[1]s.fc
 
 %%post
-semodule -i %%{_datadir}/selinux/packages/%[1]s.pp || :
+# Fail closed: a package that "installs" without loading its policy leaves
+# the application unconfined while looking hardened.
+if ! semodule -i %%{_datadir}/selinux/packages/%[1]s.pp; then
+    echo "ERROR: semodule failed to load the %[1]s policy module; the application is NOT confined" >&2
+    exit 1
+fi
 %[2]s%[3]s
 %%postun
 if [ $1 -eq 0 ]; then

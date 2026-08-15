@@ -191,8 +191,12 @@ func Build(res *pipeline.Result, env Env, extra []Subject) Statement {
 // RPMSubjectName extracts the basename of the built RPM for subject naming.
 func RPMSubjectName(rpmPath string) string { return filepath.Base(rpmPath) }
 
+// verdictOf derives the verdict from every gate independently — never from a
+// single summary boolean alone. A verdict-only deploy gate must fail closed
+// on any gate failure (finding from PR review: a pass with DomainOK=false
+// would let an unconfined service through).
 func verdictOf(res *pipeline.Result) string {
-	if res.FailureReason != "" || !res.EnforceOK || res.ConformanceFatal != "" {
+	if failureOf(res) != "" {
 		return "fail"
 	}
 	if len(res.AcceptedExceptions) > 0 {
@@ -202,14 +206,24 @@ func verdictOf(res *pipeline.Result) string {
 }
 
 func failureOf(res *pipeline.Result) string {
-	if res.FailureReason != "" {
+	switch {
+	case res.FailureReason != "":
 		return res.FailureReason
-	}
-	if res.ConformanceFatal != "" {
+	case res.ConformanceFatal != "":
 		return res.ConformanceFatal
-	}
-	if !res.EnforceOK {
+	case !res.DomainOK:
+		return "process does not run in the generated domain"
+	case !res.ExerciseOK:
+		return "workload exercise failed under enforcement"
+	case len(res.ResidualAVCs) > 0:
+		return fmt.Sprintf("%d residual denials under enforcement", len(res.ResidualAVCs))
+	case !res.EnforceOK:
 		return "enforcing verification failed"
+	}
+	for _, c := range res.StaticChecks {
+		if !c.Passed {
+			return "static least-privilege check failed: " + c.Name
+		}
 	}
 	return ""
 }
