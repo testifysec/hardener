@@ -199,7 +199,9 @@ func verdictOf(res *pipeline.Result) string {
 	if failureOf(res) != "" {
 		return "fail"
 	}
-	if len(res.AcceptedExceptions) > 0 {
+	if len(res.AcceptedExceptions) > 0 || len(res.Flags) > 0 {
+		// Flags reaching a passing verdict means they were consciously
+		// accepted; the verdict still discloses the deviation.
 		return "pass-with-exceptions"
 	}
 	return "pass"
@@ -219,6 +221,8 @@ func failureOf(res *pipeline.Result) string {
 		return fmt.Sprintf("%d residual denials under enforcement", len(res.ResidualAVCs))
 	case !res.EnforceOK:
 		return "enforcing verification failed"
+	case len(res.Flags) > 0 && !res.FlagsAccepted:
+		return fmt.Sprintf("%d review-flagged rules were not accepted (--accept-flagged records the review decision)", len(res.Flags))
 	}
 	for _, c := range res.StaticChecks {
 		if !c.Passed {

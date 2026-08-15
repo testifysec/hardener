@@ -93,7 +93,23 @@ func Refine(p *profile.Profile, denials []avc.Denial) Refinement {
 	matchers := compileFCMatchers(p)
 
 	own := ownTypes(p)
-	for _, d := range avc.Merge(denials) {
+	matchersEarly := matchers
+	// Classify labeling drift PER-DENIAL before merging: merging erases the
+	// per-path evidence, and a mislabeled file merged with a genuine foreign
+	// access would emit a type-wide allow rule covering both.
+	var remaining []avc.Denial
+	for _, d := range denials {
+		if d.SourceType == dom && isFileClass(d.Class) {
+			if exp, ok := expectedType(matchersEarly, d.Path); ok && exp != d.TargetType {
+				res.Relabels = append(res.Relabels, Relabel{
+					Path: d.Path, ObservedType: d.TargetType, ExpectedType: exp,
+				})
+				continue
+			}
+		}
+		remaining = append(remaining, d)
+	}
+	for _, d := range avc.Merge(remaining) {
 		if d.SourceType != dom {
 			// A foreign domain denied execute on one of our types means we
 			// labeled an entrypoint as content — fatal, and invisible if we
@@ -104,12 +120,6 @@ func Refine(p *profile.Profile, denials []avc.Denial) Refinement {
 				})
 			}
 			continue // other domains' business is not ours
-		}
-		if exp, ok := expectedType(matchers, d.Path); ok && exp != d.TargetType && isFileClass(d.Class) {
-			res.Relabels = append(res.Relabels, Relabel{
-				Path: d.Path, ObservedType: d.TargetType, ExpectedType: exp,
-			})
-			continue
 		}
 		perms := d.Perms
 		// Executing a helper requires the whole read+exec set; granting only
@@ -236,4 +246,19 @@ func RenderRules(rules []AllowRule) string {
 		b.WriteString("\n")
 	}
 	return b.String()
+}
+
+// FlagDeclaredCapabilities routes manifest-declared capabilities through the
+// same danger gate as observed ones. Declared privilege must not bypass the
+// human review that an observed denial for the same capability would get.
+func FlagDeclaredCapabilities(app string, caps []string) []Flag {
+	dom := DomainType(app)
+	var flags []Flag
+	for _, c := range caps {
+		rule := AllowRule{Source: dom, Target: dom, Class: "capability", Perms: []string{c}}
+		if reason := dangerReason(rule); reason != "" {
+			flags = append(flags, Flag{Reason: reason + " (declared in manifest)", Rule: rule})
+		}
+	}
+	return flags
 }

@@ -50,6 +50,9 @@ type Result struct {
 	// kernel, mode, policy package) and RPMSHA256 fingerprints the deliverable.
 	VerifierEnv map[string]string
 	RPMSHA256   string
+	// FlagsAccepted records whether --accept-flagged consciously applied the
+	// review-flagged rules; a verdict with unaccepted flags must fail.
+	FlagsAccepted bool
 	// Conformance is filled by the caller per party class; rendered in the report.
 	Party             string
 	ConformanceUndecl []string
@@ -88,7 +91,16 @@ func Run(r vm.Runner, t *target.Target, opts Options) *Result {
 	}
 	p := t.Profile()
 	dom := policy.DomainType(p.Name)
-	res := &Result{Target: t, Domain: dom}
+	res := &Result{Target: t, Domain: dom, FlagsAccepted: opts.AcceptFlagged}
+	// Manifest-declared capabilities get the same danger gate as observed
+	// ones — declared privilege must not bypass review.
+	if declared := policy.FlagDeclaredCapabilities(p.Name, p.Capabilities); len(declared) > 0 {
+		res.Flags = append(res.Flags, declared...)
+		if !opts.AcceptFlagged {
+			return failEarly(res, opts, "declared-capabilities",
+				fmt.Errorf("manifest declares privileged capabilities requiring review: %s (re-run with --accept-flagged after review)", declared[0].Reason))
+		}
+	}
 
 	fail := func(stage string, err error) *Result {
 		res.FailureReason = fmt.Sprintf("%s: %v", stage, err)
@@ -240,7 +252,8 @@ func Run(r vm.Runner, t *target.Target, opts Options) *Result {
 		res.FinalTE, res.FinalFC = te, fc
 
 		opts.Log("[%s] observe round %d (permissive domain)", t.Name, round)
-		if _, err := r.Run(fmt.Sprintf("sudo semanage permissive -a %s", dom)); err != nil {
+		if _, err := r.Run(fmt.Sprintf(
+			"sudo semanage permissive -l 2>/dev/null | grep -qw %s || sudo semanage permissive -a %s", dom, dom)); err != nil {
 			return fail("permissive", err)
 		}
 		denials, exOK, _, err := exercise(r, t, dom)
@@ -302,6 +315,21 @@ func Run(r vm.Runner, t *target.Target, opts Options) *Result {
 		}
 	}
 
+	// The verifier itself must still be trustworthy after running the
+	// artifact's privileged install/setup/exercise scripts: a malicious
+	// package could have run setenforce 0 or stopped auditd, making every
+	// later observation a false pass.
+	recheck := func(when string) error {
+		out, err := r.Run("getenforce; systemctl is-active auditd")
+		if err != nil || !hasLine(out, "Enforcing") || !hasLine(out, "active") {
+			return fmt.Errorf("verifier integrity lost %s (need Enforcing + auditd): %s %v", when, strings.TrimSpace(out), err)
+		}
+		return nil
+	}
+	if err := recheck("before enforcement verification"); err != nil {
+		return fail("verifier-integrity", err)
+	}
+
 	// 4. Enforce and verify. Nondeterministic code paths (dashboards, cron
 	// ticks, lazy caches) can surface only now, so residual denials feed one
 	// more refinement round — bounded, and only while it makes progress.
@@ -339,6 +367,10 @@ func Run(r vm.Runner, t *target.Target, opts Options) *Result {
 			return fail("policy-install (enforce refinement)", err)
 		}
 		res.FinalTE, res.FinalFC = te, fc
+	}
+
+	if err := recheck("after enforcement verification"); err != nil {
+		return fail("verifier-integrity", err)
 	}
 
 	// 5. Static least-privilege assertions (the negative tests). A failing
@@ -437,6 +469,13 @@ func isEntrypointCandidate(path string) bool {
 	return !sharedInterpreters[path]
 }
 
+// failEarly mirrors Run's fail closure for use before it is defined.
+func failEarly(res *Result, opts Options, stage string, err error) *Result {
+	res.FailureReason = fmt.Sprintf("%s: %v", stage, err)
+	opts.Log("FAIL %s: %v", stage, err)
+	return res
+}
+
 // hasLine reports whether any whole line of out equals want.
 func hasLine(out, want string) bool {
 	for _, line := range strings.Split(out, "\n") {
@@ -488,13 +527,16 @@ func reconcileStalePorts(r vm.Runner, p *profile.Profile) {
 	for _, port := range p.Ports {
 		current[fmt.Sprintf("%s/%d", port.Proto, port.Port)] = true
 	}
-	existing, _ := r.Run(fmt.Sprintf("sudo semanage port -l 2>/dev/null | awk '$1==\"%s\" {print $2\"/\"$3}'", pt))
+	// semanage port -l prints "type  proto  8080, 8443, 9000-9010" — every
+	// token after the protocol is a port or range, comma-separated. Reading
+	// only field 3 leaves stale mappings behind (review finding).
+	existing, _ := r.Run(fmt.Sprintf("sudo semanage port -l 2>/dev/null | awk '$1==\"%s\" {proto=$2; for(i=3;i<=NF;i++){gsub(\",\",\"\",$i); print proto\"/\"$i}}'", pt))
 	for _, m := range strings.Fields(existing) {
 		if current[m] {
 			continue
 		}
 		parts := strings.SplitN(m, "/", 2)
-		if len(parts) == 2 {
+		if len(parts) == 2 && parts[1] != "" {
 			_, _ = r.Run(fmt.Sprintf("sudo semanage port -d -t %s -p %s %s 2>/dev/null || true", pt, parts[0], parts[1]))
 		}
 	}
@@ -523,7 +565,7 @@ func exercise(r vm.Runner, t *target.Target, dom string) ([]avc.Denial, bool, st
 		exOK = exErr == nil
 	}
 	_, _ = r.Run(fmt.Sprintf("sudo systemctl stop %s 2>/dev/null; true", t.Unit))
-	out, err := r.Run(fmt.Sprintf(`sudo tail -c +%s /var/log/audit/audit.log 2>/dev/null | grep -E '^type=(AVC|SELINUX_ERR)'; true`, "$(("+offset+"+1))"))
+	out, err := r.Run(fmt.Sprintf(`sudo tail -c +%s /var/log/audit/audit.log 2>/dev/null | grep -E '^type=(AVC|SELINUX_ERR|PATH)'; true`, "$(("+offset+"+1))"))
 	if err != nil {
 		return nil, exOK, label, err
 	}
@@ -534,7 +576,7 @@ func exercise(r vm.Runner, t *target.Target, dom string) ([]avc.Denial, bool, st
 				te.NewType, te.Op, te.OldType)
 		}
 	}
-	all := avc.ParseLog(out)
+	all := avc.ParseLogWithPaths(out)
 	var mine []avc.Denial
 	prefix := strings.TrimSuffix(dom, "_t") + "_"
 	for _, d := range all {
@@ -630,7 +672,16 @@ func fcRoot(pattern string) string {
 }
 
 // staticChecks runs sesearch least-privilege assertions against the loaded policy.
+// The queries assert EMPTY output, so broken tooling would make every check
+// pass. Two guards close that hole: the tools must exist, and a canary query
+// that is non-empty on any targeted policy must return rows.
 func staticChecks(r vm.Runner, dom string) []StaticCheck {
+	if out, err := r.Run("command -v sesearch semanage >/dev/null && echo TOOLS_OK; true"); err != nil || !strings.Contains(out, "TOOLS_OK") {
+		return []StaticCheck{{Name: "static-check tooling present", Passed: false, Detail: "sesearch/semanage unavailable in verifier"}}
+	}
+	if out, err := r.Run("sesearch -A -s init_t -c file -p execute 2>/dev/null | head -1; true"); err != nil || strings.TrimSpace(out) == "" {
+		return []StaticCheck{{Name: "static-check canary", Passed: false, Detail: "canary sesearch query returned nothing — policy query tooling is broken"}}
+	}
 	checks := []struct {
 		name  string
 		query string

@@ -56,6 +56,12 @@ func ExtractObserved(p *profile.Profile, rules []policy.AllowRule) Observed {
 	dom := policy.DomainType(p.Name)
 	obs := Observed{Ports: append([]profile.Port(nil), p.Ports...)}
 	capSet, foreignSet, bindSet := map[string]bool{}, map[string]bool{}, map[string]bool{}
+	// Manifest-declared capabilities are granted in the base TE, so they are
+	// observed behavior for conformance purposes — otherwise a declared
+	// dac_override would vanish from supplier/baseline comparison.
+	for _, c := range p.Capabilities {
+		capSet[c] = true
+	}
 	for _, r := range rules {
 		switch {
 		case (r.Class == "capability" || r.Class == "capability2") && (r.Target == dom || r.Target == "self"):

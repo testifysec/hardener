@@ -1,0 +1,118 @@
+{
+  "_type": "https://in-toto.io/Statement/v1",
+  "subject": [
+    {
+      "name": "mosquitto-selinux-1.0.0-1.el9.noarch.rpm",
+      "digest": {
+        "sha256": "dff1ff62eed83bcc5fea838618e379397546408f216f99daad87ba6f52591f1e"
+      }
+    },
+    {
+      "name": "mosquitto.te",
+      "digest": {
+        "sha256": "511049389d7442139777f6695f0dcc87bf4fb2a7d7e5dca7c9ca3eff05083aee"
+      }
+    },
+    {
+      "name": "mosquitto.fc",
+      "digest": {
+        "sha256": "8706e99bd6f55fb7eabfa56fbc8bb5250431a92db19c7aa60db58f06147d1979"
+      }
+    }
+  ],
+  "predicateType": "https://testifysec.com/attestations/hardener-verdict/v0.1",
+  "predicate": {
+    "verdict": "pass-with-exceptions",
+    "domain": "mosquitto_t",
+    "target": {
+      "name": "mosquitto",
+      "party": "second",
+      "license": "open-source (EPL-2.0)",
+      "source": "EPEL 9 RPM (mosquitto)",
+      "unit": "mosquitto.service"
+    },
+    "verifier": {
+      "distro": "AlmaLinux release 9.8 (Olive Jaguar)",
+      "kernel": "5.14.0-687.5.3.el9_8.aarch64",
+      "selinuxMode": "Enforcing",
+      "policyPackage": "selinux-policy-38.1.75-2.el9_8.noarch"
+    },
+    "gates": {
+      "exerciseEnforcing": true,
+      "domainProof": true,
+      "residualDenials": 0,
+      "staticChecks": [
+        {
+          "name": "no shadow_t read/write",
+          "passed": true
+        },
+        {
+          "name": "no etc_t write",
+          "passed": true
+        },
+        {
+          "name": "no sys_admin capability",
+          "passed": true
+        },
+        {
+          "name": "no sys_module capability",
+          "passed": true
+        },
+        {
+          "name": "no kernel module load",
+          "passed": true
+        },
+        {
+          "name": "not permissive",
+          "passed": true
+        },
+        {
+          "name": "no selinux mgmt",
+          "passed": true
+        }
+      ]
+    },
+    "observation": {
+      "rounds": [
+        {
+          "denials": 2,
+          "newRules": 1,
+          "relabels": 0,
+          "exerciseOk": true
+        },
+        {
+          "denials": 0,
+          "newRules": 0,
+          "relabels": 0,
+          "exerciseOk": true
+        }
+      ],
+      "rulesSynthesized": 1,
+      "flagged": [
+        {
+          "reason": "privileged capability: setgid",
+          "rule": "allow mosquitto_t mosquitto_t:capability { setgid setuid };"
+        }
+      ],
+      "relabels": 0
+    },
+    "conformance": {
+      "party": "second"
+    },
+    "coverage": {
+      "staticImports": true,
+      "predictions": [
+        "cap-setgid (imports initgroups, setgid)",
+        "cap-setuid (imports setuid)",
+        "dns-resolve (imports getaddrinfo)",
+        "file-unlink (imports unlink)",
+        "fork (imports fork)",
+        "outbound-connect (imports connect)",
+        "port-bind (imports accept, bind, listen)"
+      ],
+      "gaps": [
+        "outbound-connect"
+      ]
+    }
+  }
+}
