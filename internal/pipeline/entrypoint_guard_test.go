@@ -77,7 +77,9 @@ func TestAppOwnedExecutablesAreEntrypoints(t *testing.T) {
 		{"emby", "/opt/emby-server/bin/emby-server", prof("emby", nil)},
 		{"nats-server", "/usr/bin/nats-server", prof("nats-server", nil)},
 		{"gitea", "/opt/gitea/bin/gitea", prof("gitea", nil)},
-		{"plex", "/usr/lib/plexmediaserver/Plex Media Server", prof("plex", nil)},
+		// Plex's vendor dir has no separator boundary to "plex", so it relies
+		// on the manifest declaring the executable (as plex.yaml does).
+		{"plex", "/usr/lib/plexmediaserver/Plex Media Server", prof("plex", []string{"/usr/lib/plexmediaserver/Plex Media Server"})},
 		{"webmin", "/usr/libexec/webmin/miniserv.pl", prof("webmin", nil)},
 		{"mosquitto", "/usr/sbin/mosquitto", prof("mosquitto", nil)},
 		{"declared", "/weird/path/thing", prof("declared", []string{"/weird/path/thing"})},
@@ -87,5 +89,26 @@ func TestAppOwnedExecutablesAreEntrypoints(t *testing.T) {
 		if !isAppOwnedExecutable(c.p, c.path) {
 			t.Errorf("%s: %s should be an app-owned entrypoint", c.app, c.path)
 		}
+	}
+}
+
+// The forward prefix must be boundary-aware: app "post" must NOT adopt
+// "postgres", nor "plex" adopt "plexiglass". Only exact, or app-name +
+// separator (emby -> emby-server), qualifies.
+func TestPrefixTieIsBoundaryAware(t *testing.T) {
+	for _, c := range []struct {
+		app, path string
+	}{
+		{"post", "/usr/bin/postgres"},
+		{"plex", "/usr/bin/plexiglass"},
+		{"nat", "/usr/bin/national"},
+	} {
+		if isAppOwnedExecutable(prof(c.app, nil), c.path) {
+			t.Errorf("app %q must not adopt %q (boundary)", c.app, c.path)
+		}
+	}
+	// Legitimate separator ties still hold.
+	if !isAppOwnedExecutable(prof("emby", nil), "/opt/emby-server/bin/emby-server") {
+		t.Error("emby-server must tie to app emby via separator")
 	}
 }

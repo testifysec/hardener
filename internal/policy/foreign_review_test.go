@@ -47,3 +47,25 @@ func TestOwnTypeNotFlagged(t *testing.T) {
 		t.Errorf("own type must not be flagged: %+v", res.Flags)
 	}
 }
+
+// A safe foreign type is safe only for READ-ish access. A write/create/unlink
+// to cert_t or sysctl_net_t must still be flagged (review finding).
+func TestWriteToSafeForeignTypeFlagged(t *testing.T) {
+	p := widgetProfile()
+	for _, tc := range []struct {
+		typ  string
+		perm string
+	}{
+		{"cert_t", "write"},
+		{"cert_t", "unlink"},
+		{"sysctl_net_t", "write"},
+		{"cert_t", "create"},
+	} {
+		ds := []avc.Denial{{
+			SourceType: "widget_t", TargetType: tc.typ, Class: "file", Perms: []string{tc.perm},
+		}}
+		if res := Refine(p, ds); len(res.Flags) != 1 {
+			t.Errorf("%s:file %s must be flagged despite %s being read-safe: %+v", tc.typ, tc.perm, tc.typ, res.Flags)
+		}
+	}
+}
