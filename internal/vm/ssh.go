@@ -4,6 +4,7 @@ import (
 	"fmt"
 	"os/exec"
 	"path/filepath"
+	"strings"
 	"time"
 )
 
@@ -17,7 +18,12 @@ type SSH struct {
 	Timeout time.Duration
 }
 
-func (s *SSH) sshArgs(script string) []string {
+// sshArgs builds the ssh invocation. The remote command is a fixed `bash -s`;
+// the script is delivered on stdin (see Run) so ssh never word-splits a
+// multi-line script — OpenSSH concatenates trailing args with spaces, which
+// would turn `bash -c <loop\nheredoc>` into `bash -c <first-word>` and reparse
+// the rest in the remote shell.
+func (s *SSH) sshArgs() []string {
 	args := []string{
 		"-o", "BatchMode=yes",
 		"-o", "ConnectTimeout=15",
@@ -25,7 +31,7 @@ func (s *SSH) sshArgs(script string) []string {
 	if s.KeyPath != "" {
 		args = append(args, "-i", s.KeyPath)
 	}
-	args = append(args, s.Target, "bash", "-c", script)
+	args = append(args, s.Target, "bash", "-s")
 	return args
 }
 
@@ -34,7 +40,8 @@ func (s *SSH) Run(script string) (string, error) {
 	if timeout == 0 {
 		timeout = 10 * time.Minute
 	}
-	cmd := exec.Command("ssh", s.sshArgs(script)...)
+	cmd := exec.Command("ssh", s.sshArgs()...)
+	cmd.Stdin = strings.NewReader(script)
 	done := make(chan struct{})
 	var out []byte
 	var err error

@@ -53,12 +53,12 @@ func TestTypeForKind(t *testing.T) {
 // Module names must be valid SELinux identifiers even when the app name isn't.
 func TestSafeName(t *testing.T) {
 	cases := map[string]string{
-		"widget":            "widget",
-		"1password-cli":     "app_1password_cli",
-		"plexmediaserver":   "plexmediaserver",
-		"speedtest-cli":     "speedtest_cli",
-		"nats-server":       "nats_server",
-		"Weird App (v2).x":  "weird_app_v2_x",
+		"widget":           "widget",
+		"1password-cli":    "app_1password_cli",
+		"plexmediaserver":  "plexmediaserver",
+		"speedtest-cli":    "speedtest_cli",
+		"nats-server":      "nats_server",
+		"Weird App (v2).x": "weird_app_v2_x",
 	}
 	for in, want := range cases {
 		if got := SafeName(in); got != want {

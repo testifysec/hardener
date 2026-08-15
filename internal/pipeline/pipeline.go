@@ -4,6 +4,7 @@ package pipeline
 
 import (
 	"fmt"
+	"path/filepath"
 	"slices"
 	"sort"
 	"strings"
@@ -25,22 +26,22 @@ type Options struct {
 
 // Result is the full record of one target's run.
 type Result struct {
-	Target        *target.Target
-	Domain        string
-	Rounds        []RoundResult
-	FinalTE       string
-	FinalFC       string
-	Flags         []policy.Flag
-	Relabels      []policy.Relabel
-	Collisions    []policy.Collision
-	Predictions   []elfscan.Prediction // static import analysis of entrypoints
-	CoverageGaps  []elfscan.Prediction // predicted but never granted — untested behavior
-	StaticImports bool                 // false when all entrypoints are statically linked
-	EnforceOK     bool
-	DomainOK      bool // process really runs in the new domain
-	ExerciseOK    bool
-	ResidualAVCs  []avc.Denial
-	StaticChecks  []StaticCheck
+	Target         *target.Target
+	Domain         string
+	Rounds         []RoundResult
+	FinalTE        string
+	FinalFC        string
+	Flags          []policy.Flag
+	Relabels       []policy.Relabel
+	Collisions     []policy.Collision
+	Predictions    []elfscan.Prediction // static import analysis of entrypoints
+	UngrantedPreds []elfscan.Prediction // predicted by imports but not granted by the final policy
+	StaticImports  bool                 // false when all entrypoints are statically linked
+	EnforceOK      bool
+	DomainOK       bool // process really runs in the new domain
+	ExerciseOK     bool
+	ResidualAVCs   []avc.Denial
+	StaticChecks   []StaticCheck
 	// FinalProfile and FinalRules are the verified behavior record: the
 	// (possibly adjusted) profile plus every refined allow rule. Conformance
 	// checking consumes these.
@@ -151,11 +152,11 @@ func Run(r vm.Runner, t *target.Target, opts Options) *Result {
 	if execStart, err := r.Run(fmt.Sprintf(
 		"systemctl show -p ExecStart --value %s | sed -n 's/.*path=\\([^ ;]*\\).*/\\1/p' | head -1", t.Unit)); err == nil {
 		if bin := strings.TrimSpace(execStart); bin != "" && !slices.Contains(p.Executables, bin) {
-			if isEntrypointCandidate(bin) {
+			if isAppOwnedExecutable(p, bin) {
 				opts.Log("[%s] unit ExecStart is %s — adding as entrypoint", t.Name, bin)
 				p.Executables = append([]string{bin}, p.Executables...)
 			} else {
-				opts.Log("[%s] unit ExecStart %s is a shared interpreter — not labeling it; the transition happens on the exec'd app binary", t.Name, bin)
+				opts.Log("[%s] unit ExecStart %s is not positively app-owned — not labeling it; declare the real entrypoint in the manifest if the transition fails", t.Name, bin)
 			}
 		}
 	}
@@ -392,7 +393,7 @@ func Run(r vm.Runner, t *target.Target, opts Options) *Result {
 		}
 		res.StaticChecks = remaining
 	}
-	res.CoverageGaps = elfscan.CoverageGaps(res.Predictions, res.FinalTE)
+	res.UngrantedPreds = elfscan.UngrantedPredictions(res.Predictions, res.FinalTE)
 
 	res.FinalProfile = p
 	res.FinalRules = extraRules
@@ -453,20 +454,60 @@ func relabelSignature(rs []policy.Relabel) string {
 	return strings.Join(paths, ",")
 }
 
-// sharedInterpreters are system binaries that must never receive an app exec
-// label: doing so would route every use of them system-wide into the app's
-// domain. Wrapper units (ExecStart=/bin/sh -c 'exec app') still transition
-// correctly on the exec of the app's own labeled binary.
+// systemBinDirs hold shared runtimes and OS binaries. A path directly under
+// one is only an app-owned entrypoint if its basename positively ties to the
+// application (an incomplete interpreter blacklist is not enough: python3.11,
+// node, ruby, java all live here). Reject bare interpreters outright.
+var systemBinDirs = []string{"/bin/", "/usr/bin/", "/sbin/", "/usr/sbin/", "/usr/local/bin/"}
+
 var sharedInterpreters = map[string]bool{
-	"/bin/sh": true, "/usr/bin/sh": true,
-	"/bin/bash": true, "/usr/bin/bash": true,
-	"/bin/dash": true, "/usr/bin/dash": true,
-	"/usr/bin/env": true, "/bin/env": true,
-	"/usr/bin/perl": true, "/usr/bin/python": true, "/usr/bin/python3": true,
+	"sh": true, "bash": true, "dash": true, "ash": true, "zsh": true,
+	"env": true, "perl": true, "python": true, "ruby": true, "node": true,
+	"java": true, "php": true, "sh.distrib": true,
 }
 
-func isEntrypointCandidate(path string) bool {
-	return !sharedInterpreters[path]
+// isAppOwnedExecutable positively establishes that a path is the application's
+// own entrypoint before it may receive the app exec type. Labeling a shared
+// runtime as the exec type would, via init_daemon_domain, route unrelated
+// system services into this application's domain — so a blacklist is unsafe;
+// only a positive tie to the application qualifies (review finding).
+func isAppOwnedExecutable(p *profile.Profile, path string) bool {
+	base := filepath.Base(path)
+	name := strings.ToLower(base)
+	// bare interpreter (possibly versioned: python3.11, ruby3.3) — never.
+	trimmed := strings.TrimRight(name, "0123456789.")
+	if sharedInterpreters[trimmed] {
+		return false
+	}
+	// Positive ties, strongest first:
+	// 1. already a declared executable.
+	if slices.Contains(p.Executables, path) {
+		return true
+	}
+	// 2. under a filesystem tree the profile itself claims.
+	for _, pa := range p.Paths {
+		if root := fcRoot(pa.Path); root != "" && strings.HasPrefix(path, strings.TrimRight(root, "/")+"/") {
+			return true
+		}
+	}
+	// 3. under a private application tree (/opt/<x>, /usr/lib*/<x>, /usr/libexec/<x>),
+	//    which is not a shared system bin dir.
+	underSystemBin := false
+	for _, d := range systemBinDirs {
+		if strings.HasPrefix(path, d) && !strings.Contains(strings.TrimPrefix(path, d), "/") {
+			underSystemBin = true
+			break
+		}
+	}
+	if !underSystemBin {
+		// e.g. /opt/gitea/bin/gitea, /usr/lib/plexmediaserver/Plex Media Server
+		return true
+	}
+	// 4. directly in a system bin dir: require the basename to encode the app
+	//    name (e.g. /usr/sbin/mosquitto for app "mosquitto").
+	appName := strings.ToLower(policy.SafeName(p.Name))
+	return strings.Contains(strings.ReplaceAll(name, "-", "_"), appName) ||
+		strings.Contains(appName, strings.ReplaceAll(name, "-", "_"))
 }
 
 // failEarly mirrors Run's fail closure for use before it is defined.

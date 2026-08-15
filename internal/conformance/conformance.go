@@ -31,6 +31,9 @@ type Observed struct {
 	Ports            []profile.Port `yaml:"ports,omitempty"`
 	ForeignTypes     []string       `yaml:"foreign_types,omitempty"`
 	ForeignPortBinds []string       `yaml:"foreign_port_binds,omitempty"`
+	// BaseGrants is the base template's unconditional privilege set; included
+	// so undeclared use of shell exec / etc read cannot slip the contract.
+	BaseGrants []string `yaml:"base_grants,omitempty"`
 }
 
 // Finding is one observed behavior absent from the declaration.
@@ -83,6 +86,7 @@ func ExtractObserved(p *profile.Profile, rules []policy.AllowRule) Observed {
 	obs.Capabilities = sortedKeys(capSet)
 	obs.ForeignTypes = sortedKeys(foreignSet)
 	obs.ForeignPortBinds = sortedKeys(bindSet)
+	obs.BaseGrants = append([]string(nil), policy.BaseInterfaces...)
 	return obs
 }
 
@@ -115,6 +119,12 @@ func Compare(decl *profile.Declaration, obs Observed) Report {
 	for _, ft := range obs.ForeignTypes {
 		if !declTypes[ft] {
 			rep.Undeclared = append(rep.Undeclared, Finding{Kind: "foreign-type", Item: ft, Severity: "medium"})
+		}
+	}
+	declBase := toSet(decl.BaseGrants)
+	for _, g := range obs.BaseGrants {
+		if !declBase[g] {
+			rep.Undeclared = append(rep.Undeclared, Finding{Kind: "base-grant", Item: g, Severity: "medium"})
 		}
 	}
 
@@ -175,10 +185,12 @@ func SaveBaseline(path string, obs Observed) error {
 		Ports:            obs.Ports,
 		ForeignTypes:     obs.ForeignTypes,
 		ForeignPortBinds: obs.ForeignPortBinds,
+		BaseGrants:       obs.BaseGrants,
 	})
 	if err != nil {
 		return err
 	}
+	_ = obs // BaseGrants persisted via the Declaration marshal below
 	header := "# hardener privilege baseline — the app's accepted least-privilege envelope.\n" +
 		"# Regenerate deliberately with --update-baseline after reviewing any drift.\n"
 	return os.WriteFile(path, append([]byte(header), raw...), 0o644)

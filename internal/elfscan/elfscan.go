@@ -1,7 +1,11 @@
 // Package elfscan derives privilege predictions from a binary's dynamic
-// symbol imports. Dynamic observation only proves what the exercise touched;
-// static imports say what the code *can* do. The difference between the two
-// is the coverage gap report — the honest answer to "did we test enough?".
+// symbol imports — what the code *can* do. Comparing that against the final
+// policy gives GRANT coverage: which predicted behaviors the policy grants and
+// which it does not. This is NOT proof of runtime observation — several policy
+// markers (fork, shell exec, DNS) are granted unconditionally by the base
+// template, so a granted prediction may never have been exercised. Treat a
+// prediction with no matching grant as a signal the exercise likely omitted
+// that behavior; do not treat a granted prediction as verified runtime evidence.
 //
 // Limits, stated plainly: a statically linked binary (most Go daemons) has no
 // dynamic imports, so this yields nothing there — that case needs syscall-site
@@ -103,9 +107,10 @@ func Predict(syms map[string]bool) []Prediction {
 	return sortPredictions(out)
 }
 
-// CoverageGaps returns predictions with no corresponding grant in the final
-// policy: behavior the binary is capable of that the exercise never drove.
-func CoverageGaps(preds []Prediction, finalTE string) []Prediction {
+// UngrantedPredictions returns predictions the final policy does NOT grant:
+// behavior the binary is capable of that the generated policy leaves out —
+// usually because the exercise never drove it. (Named CoverageGaps historically.)
+func UngrantedPredictions(preds []Prediction, finalTE string) []Prediction {
 	var gaps []Prediction
 	for _, p := range preds {
 		covered := false

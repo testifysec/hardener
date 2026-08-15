@@ -1,9 +1,29 @@
 name: mosquitto
 party: second
+# A COMPLETE supplier declaration: the privilege drop the broker performs,
+# its listening port, AND the base access every confined daemon receives
+# (shell exec, /etc read, cert/NSS, ...). Omitting the base grants is what the
+# "-bad" variant does — and conformance now fails it, since the base template
+# grants that access with no AVC to catch it at runtime.
 declared:
   capabilities: [setgid, setuid]
   ports:
     - { proto: tcp, port: 1883 }
+  base_grants:
+    - kernel_read_system_state
+    - corecmd_exec_bin
+    - corecmd_exec_shell
+    - libs_exec_ldconfig
+    - miscfiles_read_localization
+    - miscfiles_read_generic_certs
+    - logging_send_syslog_msg
+    - files_read_etc_files
+    - files_read_usr_files
+    - fs_getattr_all_fs
+    - dev_read_urand
+    - dev_read_rand
+    - dev_read_sysfs
+    - auth_use_nsswitch
 license: open-source (EPL-2.0)
 source: EPEL 9 RPM (mosquitto)
 install: |

@@ -7,6 +7,33 @@ import (
 	"github.com/testifysec/hardener/internal/profile"
 )
 
+// BaseInterfaces are the refpolicy interfaces every generated daemon domain
+// receives unconditionally. They speed convergence but they are real
+// privilege — shell execution, /etc read, cert/NSS access — that produces no
+// AVC when the app uses it. Conformance therefore treats this set as observed
+// behavior (see conformance.BaseGrantedAccess) so a second-party supplier
+// cannot use, say, corecmd_exec_shell without declaring it. This is the single
+// source of truth: the generator and the conformance check read the same list.
+//
+// Narrowing this set toward true least-privilege (observation-gating each
+// interface) is tracked as follow-up; today it is generous-but-declared.
+var BaseInterfaces = []string{
+	"kernel_read_system_state",
+	"corecmd_exec_bin",
+	"corecmd_exec_shell",
+	"libs_exec_ldconfig",
+	"miscfiles_read_localization",
+	"miscfiles_read_generic_certs",
+	"logging_send_syslog_msg",
+	"files_read_etc_files",
+	"files_read_usr_files",
+	"fs_getattr_all_fs",
+	"dev_read_urand",
+	"dev_read_rand",
+	"dev_read_sysfs",
+	"auth_use_nsswitch",
+}
+
 // GenerateTE renders the type-enforcement module for a profile.
 func GenerateTE(p *profile.Profile) string {
 	app := SafeName(p.Name)
@@ -60,23 +87,8 @@ func GenerateTE(p *profile.Profile) string {
 	fmt.Fprintf(&b, "can_exec(%s, %s_exec_t)\n", dom, app)
 
 	// Standard environment access.
-	for _, iface := range []string{
-		"kernel_read_system_state(%s)",
-		"corecmd_exec_bin(%s)",
-		"corecmd_exec_shell(%s)",
-		"libs_exec_ldconfig(%s)",
-		"miscfiles_read_localization(%s)",
-		"miscfiles_read_generic_certs(%s)",
-		"logging_send_syslog_msg(%s)",
-		"files_read_etc_files(%s)",
-		"files_read_usr_files(%s)",
-		"fs_getattr_all_fs(%s)",
-		"dev_read_urand(%s)",
-		"dev_read_rand(%s)",
-		"dev_read_sysfs(%s)",
-		"auth_use_nsswitch(%s)",
-	} {
-		fmt.Fprintf(&b, iface+"\n", dom)
+	for _, iface := range BaseInterfaces {
+		fmt.Fprintf(&b, iface+"(%s)\n", dom)
 	}
 
 	b.WriteString("\n########################################\n# App file access\n########################################\n")

@@ -25,6 +25,10 @@ type Declaration struct {
 	// ForeignPortBinds are existing distro port types the app binds
 	// (e.g. http_cache_port_t) as opposed to ports newly labeled for it.
 	ForeignPortBinds []string `yaml:"foreign_port_binds,omitempty"`
+	// BaseGrants are the refpolicy interfaces the base template grants
+	// unconditionally (shell exec, /etc read, ...). They produce no AVC, so
+	// they are declared here to keep the conformance contract complete.
+	BaseGrants []string `yaml:"base_grants,omitempty"`
 }
 
 // Profile is the distilled least-privilege description of one artifact.

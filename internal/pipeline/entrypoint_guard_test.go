@@ -1,31 +1,63 @@
 package pipeline
 
-import "testing"
+import (
+	"testing"
 
-// Vendor units love ExecStart=/bin/sh -c '... exec "real-binary"'. Deriving
-// the entrypoint from ExecStart must NEVER label a shared interpreter as the
-// app's exec type: labeling /bin/sh plex_exec_t would make every shell
-// invocation on the system transition into plex_t. The transition still
-// happens on the exec of the real (labeled) binary inside the wrapper.
+	"github.com/testifysec/hardener/internal/profile"
+)
+
+func prof(name string, execs []string, paths ...string) *profile.Profile {
+	p := &profile.Profile{Name: name, Executables: execs}
+	for _, pa := range paths {
+		p.Paths = append(p.Paths, profile.PathAccess{Path: pa, Kind: "content"})
+	}
+	return p
+}
+
+// Shared runtimes in system bin dirs must never be adopted as an app
+// entrypoint — a positive app tie is required, not merely "not blacklisted".
+// Versioned interpreters (python3.11) count as shared.
 func TestSharedInterpretersAreNeverEntrypoints(t *testing.T) {
+	p := prof("myapp", nil)
 	for _, bad := range []string{
 		"/bin/sh", "/usr/bin/sh", "/bin/bash", "/usr/bin/bash",
-		"/usr/bin/env", "/usr/bin/perl", "/usr/bin/python3", "/usr/bin/dash",
+		"/usr/bin/env", "/usr/bin/perl", "/usr/bin/python3", "/usr/bin/python3.11",
+		"/usr/bin/node", "/usr/bin/ruby", "/usr/bin/java",
 	} {
-		if isEntrypointCandidate(bad) {
-			t.Errorf("%s must never become an app entrypoint", bad)
+		if isAppOwnedExecutable(p, bad) {
+			t.Errorf("%s must never be an app entrypoint", bad)
 		}
 	}
 }
 
-func TestAppBinariesAreEntrypoints(t *testing.T) {
-	for _, good := range []string{
-		"/opt/emby-server/bin/emby-server", // app-owned sh wrapper: fine to label
-		"/usr/bin/nats-server",
-		"/usr/lib/plexmediaserver/Plex Media Server",
-	} {
-		if !isEntrypointCandidate(good) {
-			t.Errorf("%s should be an entrypoint candidate", good)
+// An unrelated app-named binary in a system bin dir is also not this app's.
+func TestUnrelatedSystemBinaryIsNotEntrypoint(t *testing.T) {
+	p := prof("myapp", nil)
+	if isAppOwnedExecutable(p, "/usr/bin/postgres") {
+		t.Error("/usr/bin/postgres is not myapp's entrypoint")
+	}
+}
+
+// Positive ties: declared executables, app-claimed trees, private app dirs,
+// and app-named binaries directly in a system bin dir.
+func TestAppOwnedExecutablesAreEntrypoints(t *testing.T) {
+	cases := []struct {
+		app  string
+		path string
+		p    *profile.Profile
+	}{
+		{"emby", "/opt/emby-server/bin/emby-server", prof("emby", nil)},
+		{"nats-server", "/usr/bin/nats-server", prof("nats-server", nil)},
+		{"gitea", "/opt/gitea/bin/gitea", prof("gitea", nil)},
+		{"plex", "/usr/lib/plexmediaserver/Plex Media Server", prof("plex", nil)},
+		{"webmin", "/usr/libexec/webmin/miniserv.pl", prof("webmin", nil)},
+		{"mosquitto", "/usr/sbin/mosquitto", prof("mosquitto", nil)},
+		{"declared", "/weird/path/thing", prof("declared", []string{"/weird/path/thing"})},
+		{"claimed", "/srv/claimed/run", prof("claimed", nil, "/srv/claimed(/.*)?")},
+	}
+	for _, c := range cases {
+		if !isAppOwnedExecutable(c.p, c.path) {
+			t.Errorf("%s: %s should be an app-owned entrypoint", c.app, c.path)
 		}
 	}
 }

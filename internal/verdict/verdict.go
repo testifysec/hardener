@@ -87,10 +87,10 @@ type CheckResult struct {
 }
 
 type Observation struct {
-	Rounds          []Round       `json:"rounds"`
-	RulesSynthesized int          `json:"rulesSynthesized"`
-	Flagged         []FlaggedRule `json:"flagged,omitempty"`
-	Relabels        int           `json:"relabels"`
+	Rounds           []Round       `json:"rounds"`
+	RulesSynthesized int           `json:"rulesSynthesized"`
+	Flagged          []FlaggedRule `json:"flagged,omitempty"`
+	Relabels         int           `json:"relabels"`
 }
 
 type Round struct {
@@ -175,7 +175,7 @@ func Build(res *pipeline.Result, env Env, extra []Subject) Statement {
 	for _, pr := range res.Predictions {
 		p.Coverage.Predictions = append(p.Coverage.Predictions, fmt.Sprintf("%s (%s)", pr.Feature, pr.Reason))
 	}
-	for _, g := range res.CoverageGaps {
+	for _, g := range res.UngrantedPreds {
 		p.Coverage.Gaps = append(p.Coverage.Gaps, g.Feature)
 	}
 	for _, c := range res.Collisions {
