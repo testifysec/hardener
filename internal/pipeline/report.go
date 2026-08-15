@@ -57,7 +57,9 @@ func RenderReport(res *Result) string {
 			fmt.Fprintf(&b, "- %s — `%s`\n", f.Reason, f.Rule.Render())
 		}
 	}
-	b.WriteString("\n## Coverage cross-check (static import analysis)\n\n")
+	b.WriteString("\n## Grant coverage vs. static import analysis\n\n")
+	b.WriteString("_Predicted behaviors (from ELF imports) and whether the final policy grants them. " +
+		"A granted prediction is NOT proof the exercise drove it; an ungranted one likely means the exercise omitted it._\n\n")
 	if !res.StaticImports {
 		b.WriteString("Entrypoints are statically linked; import-based prediction unavailable " +
 			"(syscall-site disassembly is the follow-up for this case).\n")
@@ -66,9 +68,9 @@ func RenderReport(res *Result) string {
 	} else {
 		for _, pr := range res.Predictions {
 			gap := ""
-			for _, g := range res.CoverageGaps {
+			for _, g := range res.UngrantedPreds {
 				if g.Feature == pr.Feature {
-					gap = " — **NOT observed at runtime: exercise likely does not cover this**"
+					gap = " — **not granted by the final policy: exercise likely does not cover this**"
 				}
 			}
 			fmt.Fprintf(&b, "- `%s` (%s)%s\n", pr.Feature, pr.Reason, gap)

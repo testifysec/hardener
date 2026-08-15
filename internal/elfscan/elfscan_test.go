@@ -46,7 +46,7 @@ func TestPredict(t *testing.T) {
 
 // The whole point: features predicted statically but never granted by the
 // final policy are coverage gaps in the exercise, not proof of least privilege.
-func TestCoverageGaps(t *testing.T) {
+func TestUngrantedPredictions(t *testing.T) {
 	preds := []Prediction{
 		{Feature: "port-bind", Reason: "imports bind/listen"},
 		{Feature: "cap-setuid", Reason: "imports setuid"},
@@ -54,7 +54,7 @@ func TestCoverageGaps(t *testing.T) {
 	}
 	finalTE := `allow widget_t widget_port_t:tcp_socket name_bind;
 allow widget_t widget_t:capability { setgid setuid };`
-	gaps := CoverageGaps(preds, finalTE)
+	gaps := UngrantedPredictions(preds, finalTE)
 	if len(gaps) != 1 || gaps[0].Feature != "outbound-connect" {
 		t.Errorf("want exactly the outbound-connect gap, got %+v", gaps)
 	}
