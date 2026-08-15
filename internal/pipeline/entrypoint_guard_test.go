@@ -30,11 +30,22 @@ func TestSharedInterpretersAreNeverEntrypoints(t *testing.T) {
 	}
 }
 
-// An unrelated app-named binary in a system bin dir is also not this app's.
-func TestUnrelatedSystemBinaryIsNotEntrypoint(t *testing.T) {
+// Unrelated binaries — in a system bin dir OR a shared libexec/loader path —
+// must never be adopted. Requires a positive app tie, not merely "not in a
+// listed system bin dir" (that fallback let /usr/libexec/platform-python and
+// /lib64/ld-linux-*.so.* through).
+func TestUnrelatedBinariesAreNotEntrypoints(t *testing.T) {
 	p := prof("myapp", nil)
-	if isAppOwnedExecutable(p, "/usr/bin/postgres") {
-		t.Error("/usr/bin/postgres is not myapp's entrypoint")
+	for _, bad := range []string{
+		"/usr/bin/postgres",
+		"/usr/libexec/platform-python3.9",
+		"/lib64/ld-linux-x86-64.so.2",
+		"/usr/libexec/other-daemon/helper",
+		"/opt/somethingelse/bin/tool",
+	} {
+		if isAppOwnedExecutable(p, bad) {
+			t.Errorf("%s is not myapp's entrypoint", bad)
+		}
 	}
 }
 
