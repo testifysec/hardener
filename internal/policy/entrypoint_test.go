@@ -58,3 +58,31 @@ func TestOwnsType(t *testing.T) {
 		}
 	}
 }
+
+// Entrypoint-mislabel detection must fire ONLY for the unit launcher (init_t)
+// executing a NON-exec owned type (the mislabel case: entrypoint got
+// content_t instead of _exec_t). It must not fire for unrelated foreign
+// domains, nor for correctly-labeled _exec_t files (review finding).
+func TestEntrypointDetectionIsScoped(t *testing.T) {
+	p := widgetProfile()
+
+	// Real mislabel: init_t denied execute on our content type → entrypoint issue.
+	pos := Refine(p, []avc.Denial{{
+		SourceType: "init_t", TargetType: "widget_content_t", Class: "file",
+		Perms: []string{"execute"}, Name: "widgetd",
+	}})
+	if len(pos.Entrypoints) != 1 {
+		t.Errorf("init_t exec on owned content must be an entrypoint issue: %+v", pos)
+	}
+
+	// Negatives — none of these is a mislabel:
+	for _, d := range []avc.Denial{
+		{SourceType: "sshd_t", TargetType: "widget_exec_t", Class: "file", Perms: []string{"execute"}},
+		{SourceType: "sshd_t", TargetType: "widget_content_t", Class: "file", Perms: []string{"execute"}},
+		{SourceType: "init_t", TargetType: "widget_exec_t", Class: "file", Perms: []string{"execute"}},
+	} {
+		if res := Refine(p, []avc.Denial{d}); len(res.Entrypoints) != 0 {
+			t.Errorf("%s→%s must NOT be an entrypoint issue: %+v", d.SourceType, d.TargetType, res.Entrypoints)
+		}
+	}
+}
