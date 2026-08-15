@@ -437,6 +437,19 @@ func Run(r vm.Runner, t *target.Target, opts Options) *Result {
 	}
 	res.UngrantedPreds = elfscan.UngrantedPredictions(res.Predictions, res.FinalTE)
 
+	// Re-hash the entrypoints after all executions and fail on any change: a
+	// self-updating artifact (or the exercise itself) could have replaced a
+	// binary after the initial capture, leaving the verdict bound to bytes
+	// that were never actually verified under enforcement (review finding).
+	for exe, want := range res.EntrypointDigests {
+		out, err := r.Run(fmt.Sprintf("sha256sum %q 2>/dev/null", exe))
+		fs := strings.Fields(out)
+		if err != nil || len(fs) == 0 || fs[0] != want {
+			return fail("entrypoint-mutated", fmt.Errorf(
+				"entrypoint %s changed digest during verification (%s → %v) — the verdict cannot bind unverified bytes", exe, want, fs))
+		}
+	}
+
 	res.FinalProfile = p
 	res.FinalRules = extraRules
 
