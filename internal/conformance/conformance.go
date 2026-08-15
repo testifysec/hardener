@@ -74,10 +74,24 @@ func ExtractObserved(p *profile.Profile, rules []policy.AllowRule) Observed {
 		case policy.IsOwnType(p, r.Target):
 			// access to the app's own types is the point of the policy
 		case strings.HasSuffix(r.Target, "_port_t"):
+			// name_bind is the inbound-listener signal compared against
+			// ForeignPortBinds. Any OTHER port permission (name_connect for
+			// outbound, recv/send) must NOT be silently dropped: previously
+			// only name_bind was recorded, so a name_connect on http_port_t
+			// vanished from both ForeignPortBinds and ForeignTypes and passed
+			// second-party conformance as undeclared outbound access (review
+			// finding). Surface any non-bind port access as a foreign type so
+			// it still faces the declaration comparison.
+			nonBind := false
 			for _, perm := range r.Perms {
 				if perm == "name_bind" {
 					bindSet[r.Target] = true
+				} else {
+					nonBind = true
 				}
+			}
+			if nonBind {
+				foreignSet[r.Target] = true
 			}
 		default:
 			foreignSet[r.Target] = true

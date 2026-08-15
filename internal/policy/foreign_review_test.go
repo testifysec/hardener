@@ -36,6 +36,39 @@ func TestSafeForeignTypeNotFlagged(t *testing.T) {
 	}
 }
 
+// Round 12, finding #4: EXECUTING a safe foreign DATA type is not routine read
+// access and must go to review. allReadOnly counted execute as read-only, so a
+// cert_t:file execute auto-applied foreign-content execution past the reviewer.
+func TestSafeForeignTypeExecuteFlagged(t *testing.T) {
+	p := widgetProfile()
+	ds := []avc.Denial{{
+		SourceType: "widget_t", TargetType: "cert_t", Class: "file",
+		Perms: []string{"execute"}, Path: "/etc/pki/tls/cert.pem",
+	}}
+	res := Refine(p, ds)
+	if len(res.Flags) != 1 {
+		t.Fatalf("execute of a foreign data type (cert_t) must be flagged for review, got %+v", res)
+	}
+	if len(res.AllowRules) != 0 {
+		t.Errorf("flagged foreign execute must not auto-apply: %v", res.AllowRules)
+	}
+}
+
+// Executing a foreign *_exec_t type (a binary the distro means to be run, e.g.
+// hostname_exec_t) IS routine and stays auto-applied — the fix must scope the
+// execute restriction to non-exec types, not block legitimate system-binary
+// execution.
+func TestSafeForeignExecTypeExecuteAllowed(t *testing.T) {
+	p := widgetProfile()
+	ds := []avc.Denial{{
+		SourceType: "widget_t", TargetType: "hostname_exec_t", Class: "file",
+		Perms: []string{"execute", "read", "open"}, Path: "/usr/bin/hostname",
+	}}
+	if res := Refine(p, ds); len(res.Flags) != 0 {
+		t.Errorf("execute of hostname_exec_t is routine and must not be flagged: %+v", res.Flags)
+	}
+}
+
 // The app's own types are never flagged (they are the point of the policy).
 func TestOwnTypeNotFlagged(t *testing.T) {
 	p := widgetProfile()

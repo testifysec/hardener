@@ -191,14 +191,17 @@ func Run(r vm.Runner, t *target.Target, opts Options) *Result {
 		}
 		if real != exe {
 			opts.Log("[%s] executable %s is a symlink → %s (labeling target)", t.Name, exe, real)
-			// A symlink can resolve to a shared runtime (/opt/app/launcher ->
-			// /bin/sh). Labeling that target as _exec_t would route every use
-			// of the shell into this domain — re-validate the resolved inode
-			// and drop it if it is not itself app-owned (review finding).
-			if !isAppOwnedExecutable(p, real) {
-				opts.Log("[%s] resolved target %s is not app-owned — refusing to label a shared binary; declare the real entrypoint", t.Name, real)
-				continue
-			}
+		}
+		// Every resolved entrypoint must be positively app-owned before it may
+		// receive the app exec type. Labeling a shared runtime as _exec_t routes
+		// every use of that binary into this domain via init_daemon_domain. A
+		// symlink can resolve to /bin/sh, but a manifest can ALSO name a shared
+		// binary (/usr/bin/bash) directly — validation must run for unchanged
+		// paths too, not only when readlink rewrote them (review finding: the
+		// direct case previously skipped the check and relabeled the shell).
+		if !isAppOwnedExecutable(p, real) {
+			opts.Log("[%s] entrypoint %s is not positively app-owned — refusing to label a shared binary; declare the real entrypoint in the manifest", t.Name, real)
+			continue
 		}
 		if !seen[real] {
 			seen[real] = true
@@ -819,19 +822,38 @@ func staticChecks(r vm.Runner, dom string) []StaticCheck {
 	checks := []struct {
 		name  string
 		query string
+		// grepStyle marks a check whose command legitimately exits non-zero on
+		// the PASS path (grep found no match), so a non-zero exit is NOT a
+		// tooling failure. sesearch checks are the opposite: a non-zero exit
+		// means the query could not run, and an empty result must NOT be read
+		// as "no denials" (review finding — fail closed, not open).
+		grepStyle bool
 	}{
-		{"no shadow_t read/write", fmt.Sprintf("sesearch -A -s %s -t shadow_t -c file -p read,write,open,append 2>/dev/null", dom)},
-		{"no etc_t write", fmt.Sprintf("sesearch -A -s %s -t etc_t -c file -p write,append,create,unlink 2>/dev/null", dom)},
-		{"no sys_admin capability", fmt.Sprintf("sesearch -A -s %s -c capability -p sys_admin 2>/dev/null", dom)},
-		{"no sys_module capability", fmt.Sprintf("sesearch -A -s %s -c capability -p sys_module 2>/dev/null", dom)},
-		{"no kernel module load", fmt.Sprintf("sesearch -A -s %s -c system -p module_load 2>/dev/null", dom)},
-		{"not permissive", fmt.Sprintf("sudo semanage permissive -l 2>/dev/null | grep -w %s", dom)},
-		{"no selinux mgmt", fmt.Sprintf("sesearch -A -s %s -t selinux_config_t -p write 2>/dev/null", dom)},
+		{"no shadow_t read/write", fmt.Sprintf("sesearch -A -s %s -t shadow_t -c file -p read,write,open,append 2>/dev/null", dom), false},
+		{"no etc_t write", fmt.Sprintf("sesearch -A -s %s -t etc_t -c file -p write,append,create,unlink 2>/dev/null", dom), false},
+		{"no sys_admin capability", fmt.Sprintf("sesearch -A -s %s -c capability -p sys_admin 2>/dev/null", dom), false},
+		{"no sys_module capability", fmt.Sprintf("sesearch -A -s %s -c capability -p sys_module 2>/dev/null", dom), false},
+		{"no kernel module load", fmt.Sprintf("sesearch -A -s %s -c system -p module_load 2>/dev/null", dom), false},
+		{"not permissive", fmt.Sprintf("sudo semanage permissive -l 2>/dev/null | grep -w %s", dom), true},
+		{"no selinux mgmt", fmt.Sprintf("sesearch -A -s %s -t selinux_config_t -p write 2>/dev/null", dom), false},
 	}
 	var out []StaticCheck
 	for _, c := range checks {
-		res, _ := r.Run(c.query + "; true")
+		res, err := r.Run(c.query)
 		trimmed := strings.TrimSpace(res)
+		// A sesearch query that fails to execute (bad policy, crashed tool)
+		// returns empty output with a non-zero exit. Recording that as an empty
+		// result marked the domain "clean" — a fail-open verification hole. Fail
+		// the check closed instead so the verdict reflects that verification
+		// could not run. grep-style checks are exempt: their non-zero exit is
+		// the safe "no match" outcome.
+		if err != nil && !c.grepStyle {
+			out = append(out, StaticCheck{
+				Name: c.name, Query: c.query, Passed: false,
+				Detail: "verification query failed to execute (fail-closed): " + trimmed,
+			})
+			continue
+		}
 		out = append(out, StaticCheck{Name: c.name, Query: c.query, Passed: trimmed == "", Detail: trimmed})
 	}
 	return out

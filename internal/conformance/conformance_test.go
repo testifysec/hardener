@@ -45,6 +45,41 @@ func TestExtractObserved(t *testing.T) {
 	}
 }
 
+// Round 12, finding #3: a non-bind port permission (name_connect for outbound,
+// recv/send) must NOT be silently dropped. Previously only name_bind was
+// recorded from a *_port_t rule, so undeclared outbound access to http_port_t
+// vanished from both ForeignPortBinds and ForeignTypes and passed second-party
+// conformance — producing incorrect evidence.
+func TestForeignPortConnectSurfacesAsForeignType(t *testing.T) {
+	has := func(xs []string, v string) bool {
+		for _, x := range xs {
+			if x == v {
+				return true
+			}
+		}
+		return false
+	}
+	rules := []policy.AllowRule{
+		{Source: "widget_t", Target: "http_port_t", Class: "tcp_socket", Perms: []string{"name_connect"}},
+	}
+	obs := ExtractObserved(widgetProfile(), rules)
+	if !has(obs.ForeignTypes, "http_port_t") {
+		t.Errorf("outbound name_connect to http_port_t must surface as a foreign type, got ForeignTypes=%v", obs.ForeignTypes)
+	}
+	if has(obs.ForeignPortBinds, "http_port_t") {
+		t.Errorf("name_connect is not a bind and must not appear in ForeignPortBinds: %v", obs.ForeignPortBinds)
+	}
+
+	// A rule with BOTH name_bind and name_connect is recorded as both — the
+	// bind faces ForeignPortBinds, the outbound faces ForeignTypes.
+	both := ExtractObserved(widgetProfile(), []policy.AllowRule{
+		{Source: "widget_t", Target: "dns_port_t", Class: "tcp_socket", Perms: []string{"name_bind", "name_connect"}},
+	})
+	if !has(both.ForeignPortBinds, "dns_port_t") || !has(both.ForeignTypes, "dns_port_t") {
+		t.Errorf("bind+connect must record both: binds=%v types=%v", both.ForeignPortBinds, both.ForeignTypes)
+	}
+}
+
 // A supplier declaration that omits observed privileged behavior yields
 // undeclared findings — the second-party contract violation signal.
 func TestCompareFlagsUndeclared(t *testing.T) {

@@ -181,7 +181,7 @@ func Refine(p *profile.Profile, denials []avc.Denial) Refinement {
 		// ssh_home_t would otherwise just become policy). (review finding)
 		if reason == "" && !own[d.TargetType] && !isCapabilityClass(d.Class) &&
 			!strings.HasSuffix(d.TargetType, "_port_t") &&
-			!(safeForeignTypes[d.TargetType] && allReadOnly(perms)) {
+			!(safeForeignTypes[d.TargetType] && routineForeignAccess(d.TargetType, perms)) {
 			reason = "foreign type access requiring review: " + d.TargetType
 		}
 		if reason != "" {
@@ -319,6 +319,35 @@ func allReadOnly(perms []string) bool {
 		}
 	}
 	return len(perms) > 0
+}
+
+func isExecPerm(p string) bool { return p == "execute" || p == "execute_no_trans" }
+
+// routineForeignAccess reports whether every requested permission on a safe
+// foreign type is routine enough to auto-apply without review. Read-only perms
+// always qualify. execute qualifies ONLY for an *_exec_t target — a binary the
+// distro means to be run (hostname_exec_t, ldconfig_exec_t). Executing a
+// foreign DATA type (cert_t) is never routine: allReadOnly counted execute as
+// read-only, so a cert_t:file execute auto-applied foreign-content execution
+// past review (review finding). This is stricter than allReadOnly on purpose —
+// allReadOnly still treats execute as non-mutating for the own-file
+// self-modification check, where executing your own entrypoint is expected.
+func routineForeignAccess(targetType string, perms []string) bool {
+	if len(perms) == 0 {
+		return false
+	}
+	execOK := strings.HasSuffix(targetType, "_exec_t")
+	for _, p := range perms {
+		switch {
+		case isExecPerm(p):
+			if !execOK {
+				return false
+			}
+		case !readOnlyPerms[p]:
+			return false
+		}
+	}
+	return true
 }
 
 // isCapabilityClass covers the SELinux capability object classes, including
