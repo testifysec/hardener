@@ -12,10 +12,11 @@ func RenderReport(res *Result) string {
 	fmt.Fprintf(&b, "- License class: %s\n- Source: %s\n- Domain: `%s`\n\n", res.Target.License, res.Target.Source, res.Domain)
 
 	status := "PASS"
-	if len(res.AcceptedExceptions) > 0 {
+	if len(res.AcceptedExceptions) > 0 || (len(res.Flags) > 0 && res.FlagsAccepted) {
 		status = "PASS (with accepted exceptions)"
 	}
-	if res.FailureReason != "" || !res.EnforceOK {
+	if res.FailureReason != "" || !res.EnforceOK || res.ConformanceFatal != "" ||
+		(len(res.Flags) > 0 && !res.FlagsAccepted) {
 		status = "FAIL"
 	}
 	fmt.Fprintf(&b, "**Overall: %s**\n\n", status)

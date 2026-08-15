@@ -23,7 +23,7 @@ func passingResult() *pipeline.Result {
 			Reason: "privileged capability: setuid",
 			Rule:   policy.AllowRule{Source: "widget_t", Target: "widget_t", Class: "capability", Perms: []string{"setuid"}},
 		}},
-		EnforceOK: true, DomainOK: true, ExerciseOK: true,
+		EnforceOK: true, DomainOK: true, ExerciseOK: true, FlagsAccepted: true,
 		StaticChecks: []pipeline.StaticCheck{{Name: "no shadow_t read/write", Passed: true}},
 		RPMPath:      "/home/u/rpmbuild/RPMS/noarch/widget-selinux-1.0.0-1.el9.noarch.rpm",
 	}
@@ -52,7 +52,8 @@ func TestBuildStatementShape(t *testing.T) {
 			t.Errorf("missing subject %q (have %v)", want, names)
 		}
 	}
-	if st.Predicate.Verdict != "pass" {
+	// The fixture carries an accepted review flag, so the verdict discloses it.
+	if st.Predicate.Verdict != "pass-with-exceptions" {
 		t.Errorf("verdict: %q", st.Predicate.Verdict)
 	}
 	if st.Predicate.Target.Party != "second" || st.Predicate.Domain != "widget_t" {

@@ -25,7 +25,52 @@ type Denial struct {
 var (
 	avcRe   = regexp.MustCompile(`avc:\s+denied\s+\{([^}]*)\}\s+for\s+(.*)$`)
 	fieldRe = regexp.MustCompile(`(\w+)=("[^"]*"|\S+)`)
+	eventRe = regexp.MustCompile(`msg=audit\(([0-9.:]+)\)`)
 )
+
+// ParseLogWithPaths parses AVC denials and correlates full paths from
+// sibling type=PATH records sharing the same audit event ID. Kernel AVCs
+// frequently report only name= (a basename); without the full path the
+// refine stage cannot distinguish a mislabeled file (fix: restorecon) from a
+// genuine missing permission (fix: allow rule) and over-grants type-wide.
+func ParseLogWithPaths(log string) []Denial {
+	type indexed struct {
+		d     Denial
+		event string
+	}
+	var ds []indexed
+	paths := map[string]string{} // event id → first PATH name
+	for _, line := range strings.Split(log, "\n") {
+		ev := ""
+		if m := eventRe.FindStringSubmatch(line); m != nil {
+			ev = m[1]
+		}
+		if strings.Contains(line, "type=PATH") && ev != "" {
+			if _, seen := paths[ev]; !seen {
+				for _, f := range fieldRe.FindAllStringSubmatch(line, -1) {
+					if f[1] == "name" {
+						paths[ev] = strings.Trim(f[2], `"`)
+						break
+					}
+				}
+			}
+			continue
+		}
+		if d, err := ParseLine(line); err == nil {
+			ds = append(ds, indexed{*d, ev})
+		}
+	}
+	out := make([]Denial, 0, len(ds))
+	for _, x := range ds {
+		if x.d.Path == "" && x.event != "" {
+			if p, ok := paths[x.event]; ok {
+				x.d.Path = p
+			}
+		}
+		out = append(out, x.d)
+	}
+	return out
+}
 
 // ParseLine parses a single audit record line. Returns an error for non-AVC lines.
 func ParseLine(line string) (*Denial, error) {

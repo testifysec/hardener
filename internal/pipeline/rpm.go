@@ -42,8 +42,11 @@ func GenerateSpec(p *profile.Profile) string {
 		fmt.Fprintf(&relabel, "restorecon -RF %q 2>/dev/null || :\n", root)
 	}
 	var ports strings.Builder
+	var portsDel strings.Builder
 	for _, port := range p.Ports {
 		fmt.Fprintf(&ports, "semanage port -a -t %s -p %s %d 2>/dev/null || :\n",
+			policy.PortType(p.Name), port.Proto, port.Port)
+		fmt.Fprintf(&portsDel, "    semanage port -d -t %s -p %s %d 2>/dev/null || :\n",
 			policy.PortType(p.Name), port.Proto, port.Port)
 	}
 	return fmt.Sprintf(`Name:           %[1]s-selinux
@@ -77,11 +80,11 @@ fi
 %[2]s%[3]s
 %%postun
 if [ $1 -eq 0 ]; then
-    semodule -r %[1]s 2>/dev/null || :
+%[4]s    semodule -r %[1]s 2>/dev/null || :
 fi
 
 %%files
 %%{_datadir}/selinux/packages/%[1]s.pp
 %%{_datadir}/selinux/hardener/%[1]s.fc
-`, app, relabel.String(), ports.String())
+`, app, relabel.String(), ports.String(), portsDel.String())
 }

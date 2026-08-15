@@ -27,6 +27,7 @@ func TestVerdictFailsClosedPerGate(t *testing.T) {
 			})
 		}},
 		{"conformance fatal", func(r *pipeline.Result) { r.ConformanceFatal = "drift" }},
+		{"review flags not accepted", func(r *pipeline.Result) { r.FlagsAccepted = false }},
 		{"stage failure", func(r *pipeline.Result) { r.FailureReason = "install: exploded" }},
 	}
 	for _, c := range cases {
