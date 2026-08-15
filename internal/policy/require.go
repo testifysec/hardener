@@ -22,7 +22,10 @@ func ownTypes(p *profile.Profile) map[string]bool {
 		app + "_exec_t":    true,
 		PortType(p.Name):   true,
 	}
-	for _, k := range []Kind{KindConf, KindVarLib, KindLog, KindRuntime, KindContent, KindTmp, KindCache, KindUnit} {
+	// KindUnit is intentionally excluded: unit files take the shared base type
+	// systemd_unit_file_t (see TypeForKind), which the module does not declare
+	// and does not own.
+	for _, k := range []Kind{KindConf, KindVarLib, KindLog, KindRuntime, KindContent, KindTmp, KindCache} {
 		own[TypeForKind(p.Name, k)] = true
 	}
 	return own

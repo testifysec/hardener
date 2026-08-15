@@ -15,6 +15,57 @@ func denialsOn(targetType string) []avc.Denial {
 	}}
 }
 
+// Round 13: GenerateFC emits an _exec_t line for every executable, so an
+// executable path the distro already claims collides exactly like a path claim
+// — an undetected duplicate spec makes semodule reject the whole module. The
+// collision must be detected AND excluded from the rendered fc.
+func TestFindCollisionsDetectsExecutables(t *testing.T) {
+	base := "/usr/sbin/myapp\t--\tsystem_u:object_r:bin_t:s0\n"
+	p := &profile.Profile{
+		Name:        "myapp",
+		Executables: []string{"/usr/sbin/myapp"},
+	}
+	cols := FindCollisions(p, base)
+	if len(cols) != 1 || cols[0].Path != "/usr/sbin/myapp" {
+		t.Fatalf("executable collision must be detected, got %+v", cols)
+	}
+	if cols[0].BaseType != "bin_t" || cols[0].WouldBeType != "myapp_exec_t" {
+		t.Errorf("collision fields: %+v", cols[0])
+	}
+	fc := GenerateFCExcluding(p, cols)
+	if strings.Contains(fc, "/usr/sbin/myapp") {
+		t.Errorf("colliding executable must be excluded from fc:\n%s", fc)
+	}
+	// An executable the distro does NOT claim is still emitted.
+	p2 := &profile.Profile{Name: "myapp", Executables: []string{"/opt/myapp/bin/myapp"}}
+	if cols := FindCollisions(p2, base); len(cols) != 0 {
+		t.Errorf("unclaimed executable must not collide: %+v", cols)
+	}
+}
+
+// Round 13: systemd unit files must take the shared base type so systemd can
+// load them — and so the module never emits an fc entry referencing a type it
+// never declares (app_unit_file_t was undeclared → uncompilable module).
+func TestUnitPathUsesBaseSystemdType(t *testing.T) {
+	if got := TypeForKind("myapp", KindUnit); got != "systemd_unit_file_t" {
+		t.Errorf("unit kind must map to base systemd_unit_file_t, got %q", got)
+	}
+	p := &profile.Profile{Name: "myapp", Paths: []profile.PathAccess{
+		{Path: "/usr/lib/systemd/system/myapp.service", Kind: "unit"},
+	}}
+	if IsOwnType(p, "systemd_unit_file_t") {
+		t.Error("systemd_unit_file_t is a base type, not app-owned")
+	}
+	fc, te := GenerateFC(p), GenerateTE(p)
+	if !strings.Contains(fc, "systemd_unit_file_t") {
+		t.Errorf("unit path fc must use base systemd type:\n%s", fc)
+	}
+	// Neither fc nor te may reference an undeclared app unit type.
+	if strings.Contains(fc, "myapp_unit_file_t") || strings.Contains(te, "myapp_unit_file_t") {
+		t.Errorf("must not reference undeclared app unit type\nfc:\n%s\nte:\n%s", fc, te)
+	}
+}
+
 // The distro base policy already claims some paths. Re-declaring the identical
 // path expression makes semodule reject the module outright
 // ("Problems processing filecon rules"), so collisions must be found first.
