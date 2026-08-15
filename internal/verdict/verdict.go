@@ -15,10 +15,13 @@ import (
 	"encoding/hex"
 	"fmt"
 	"path/filepath"
+	"regexp"
 
 	"github.com/testifysec/hardener/internal/pipeline"
 	"github.com/testifysec/hardener/internal/policy"
 )
+
+var sha256Re = regexp.MustCompile(`^[0-9a-f]{64}$`)
 
 // PredicateType identifies this attestation's schema.
 const PredicateType = "https://testifysec.com/attestations/hardener-verdict/v0.1"
@@ -122,18 +125,43 @@ type Coverage struct {
 // hashed in the verifier) are passed in; the .te/.fc are hashed here since
 // their content lives in the result.
 func Build(res *pipeline.Result, env Env, extra []Subject) Statement {
+	st, err := BuildOrErr(res, env, extra)
+	if err != nil {
+		panic(err)
+	}
+	return st
+}
+
+// BuildOrErr maps a pipeline result to the statement. Every subject digest is
+// validated as 64-hex sha256 — a malformed or empty digest fails construction
+// rather than silently binding the attestation to nothing (review finding).
+// The entrypoint bytes are subjects too, binding the verdict to exactly what
+// was installed and exercised, not just the generated policy text.
+func BuildOrErr(res *pipeline.Result, env Env, extra []Subject) (Statement, error) {
 	app := policy.SafeName(res.Target.Name)
-	subjects := make([]wireSubject, 0, len(extra)+2)
+	subjects := make([]wireSubject, 0, len(extra)+4)
+	add := func(name, digest string) error {
+		if !sha256Re.MatchString(digest) {
+			return fmt.Errorf("subject %q: invalid sha256 digest %q (want 64 lowercase hex)", name, digest)
+		}
+		subjects = append(subjects, wireSubject{Name: name, Digest: map[string]string{"sha256": digest}})
+		return nil
+	}
 	for _, s := range extra {
-		if s.SHA256 != "" {
-			subjects = append(subjects, wireSubject{Name: s.Name, Digest: map[string]string{"sha256": s.SHA256}})
+		if err := add(s.Name, s.SHA256); err != nil {
+			return Statement{}, err
+		}
+	}
+	for path, digest := range res.EntrypointDigests {
+		if err := add(path, digest); err != nil {
+			return Statement{}, err
 		}
 	}
 	if res.FinalTE != "" {
-		subjects = append(subjects, wireSubject{Name: app + ".te", Digest: map[string]string{"sha256": sum(res.FinalTE)}})
+		_ = add(app+".te", sum(res.FinalTE))
 	}
 	if res.FinalFC != "" {
-		subjects = append(subjects, wireSubject{Name: app + ".fc", Digest: map[string]string{"sha256": sum(res.FinalFC)}})
+		_ = add(app+".fc", sum(res.FinalFC))
 	}
 
 	p := Predicate{
@@ -185,7 +213,7 @@ func Build(res *pipeline.Result, env Env, extra []Subject) Statement {
 	return Statement{
 		Type: "https://in-toto.io/Statement/v1", Subject: subjects,
 		PredicateType: PredicateType, Predicate: p,
-	}
+	}, nil
 }
 
 // RPMSubjectName extracts the basename of the built RPM for subject naming.
