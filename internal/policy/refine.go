@@ -163,7 +163,8 @@ func Refine(p *profile.Profile, denials []avc.Denial) Refinement {
 		// it must not fail open the way the finite blocklists did (a read of
 		// ssh_home_t would otherwise just become policy). (review finding)
 		if reason == "" && !own[d.TargetType] && !isCapabilityClass(d.Class) &&
-			!strings.HasSuffix(d.TargetType, "_port_t") && !safeForeignTypes[d.TargetType] {
+			!strings.HasSuffix(d.TargetType, "_port_t") &&
+			!(safeForeignTypes[d.TargetType] && allReadOnly(perms)) {
 			reason = "foreign type access requiring review: " + d.TargetType
 		}
 		if reason != "" {
@@ -272,6 +273,25 @@ func compileFCMatchers(p *profile.Profile) []fcMatcher {
 		ms = append(ms, fcMatcher{re, TypeForKind(p.Name, KindFromString(pa.Kind))})
 	}
 	return ms
+}
+
+// readOnlyPerms are non-mutating file/dir/socket permissions. A safe foreign
+// type is bypassed only when EVERY requested permission is read-only; any
+// write/create/unlink/append/setattr forces review even for an allowlisted
+// type (a write to cert_t is not "routine read access").
+var readOnlyPerms = map[string]bool{
+	"read": true, "open": true, "getattr": true, "lock": true, "ioctl": true,
+	"map": true, "search": true, "execute": true, "execute_no_trans": true,
+	"list_dir_perms": true, "use": true, "getopt": true, "connectto": true,
+}
+
+func allReadOnly(perms []string) bool {
+	for _, p := range perms {
+		if !readOnlyPerms[p] {
+			return false
+		}
+	}
+	return len(perms) > 0
 }
 
 // isCapabilityClass covers the SELinux capability object classes, including

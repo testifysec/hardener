@@ -98,7 +98,10 @@ type StaticCheck struct {
 
 // Run executes the full pipeline for one target.
 func Run(r vm.Runner, t *target.Target, opts Options) *Result {
-	if opts.MaxRounds == 0 {
+	if opts.MaxRounds < 1 {
+		// 0 means "unset" → default; negative would skip synthesis entirely and
+		// let enforcement pass against a stale module on a persistent verifier
+		// (review finding). Clamp both to the default.
 		opts.MaxRounds = 5
 	}
 	if opts.Log == nil {
@@ -532,10 +535,12 @@ func isAppOwnedExecutable(p *profile.Profile, path string) bool {
 	appName := strings.ToLower(policy.SafeName(p.Name))
 	matches := func(seg string) bool {
 		seg = norm(seg)
-		// Exact, or a forward prefix by a non-trivial (≥4 char) app name so a
-		// vendor dir like "plexmediaserver" ties to "plex" while a short
-		// basename ("x", "le") never ties by substring or reverse-substring.
-		return seg == appName || (len(appName) >= 4 && strings.HasPrefix(seg, appName))
+		// Exact, or app name followed by a separator boundary. norm() maps
+		// '-' and '.' to '_', so "emby_server" ties to "emby" but "postgres"
+		// does NOT tie to "post" and "plexiglass" does NOT tie to "plex"
+		// (boundary-aware, review finding). Vendor dirs without a separator
+		// (plexmediaserver) rely on the manifest declaring the executable.
+		return seg == appName || strings.HasPrefix(seg, appName+"_")
 	}
 	if matches(name) {
 		return true
