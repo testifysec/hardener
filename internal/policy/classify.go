@@ -103,7 +103,12 @@ func TypeForKind(app string, k Kind) string {
 	case KindCache:
 		return app + "_cache_t"
 	case KindUnit:
-		return app + "_unit_file_t"
+		// systemd unit files take the shared base type, not an app-specific
+		// one: systemd itself must read the unit to start the service, and the
+		// module never declares an app unit type — emitting app_unit_file_t
+		// produced an fc entry referencing an undeclared type and an
+		// uncompilable module (review finding).
+		return "systemd_unit_file_t"
 	default:
 		return app + "_content_t"
 	}

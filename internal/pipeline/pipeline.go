@@ -728,21 +728,28 @@ func exercise(r vm.Runner, t *target.Target, dom string) ([]avc.Denial, bool, st
 }
 
 // mergeNewRules merges freshly observed rules into the accumulated set,
-// returning how many were genuinely new (rule identity = target+class+perm).
+// returning how many were genuinely new. Rule identity is
+// source+target+class+perm: the SOURCE domain is part of the key so a rule for
+// one domain never suppresses or absorbs the same target/perm observed for a
+// DIFFERENT domain (an entrypoint denial is attributed to init_t, and the
+// planned multi-domain split emits several sources) — review finding.
 func mergeNewRules(acc *[]policy.AllowRule, fresh []policy.AllowRule) int {
 	have := map[string]bool{}
+	key := func(r policy.AllowRule, p string) string {
+		return r.Source + "/" + r.Target + "/" + r.Class + "/" + p
+	}
 	for _, r := range *acc {
 		for _, p := range r.Perms {
-			have[r.Target+"/"+r.Class+"/"+p] = true
+			have[key(r, p)] = true
 		}
 	}
 	added := 0
 	for _, r := range fresh {
 		var newPerms []string
 		for _, p := range r.Perms {
-			if !have[r.Target+"/"+r.Class+"/"+p] {
+			if !have[key(r, p)] {
 				newPerms = append(newPerms, p)
-				have[r.Target+"/"+r.Class+"/"+p] = true
+				have[key(r, p)] = true
 			}
 		}
 		if len(newPerms) > 0 {
@@ -754,13 +761,15 @@ func mergeNewRules(acc *[]policy.AllowRule, fresh []policy.AllowRule) int {
 	return added
 }
 
-// normalizeRules re-merges accumulated rules by (target, class).
+// normalizeRules re-merges accumulated rules by (source, target, class). Source
+// is part of the key so rules for different domains are never collapsed into
+// one another's permission set (review finding).
 func normalizeRules(rules []policy.AllowRule) []policy.AllowRule {
-	type key struct{ t, c string }
+	type key struct{ s, t, c string }
 	idx := map[key]int{}
 	var out []policy.AllowRule
 	for _, r := range rules {
-		k := key{r.Target, r.Class}
+		k := key{r.Source, r.Target, r.Class}
 		if i, ok := idx[k]; ok {
 			out[i].Perms = unionSorted(out[i].Perms, r.Perms)
 			continue

@@ -4,8 +4,45 @@ import (
 	"strings"
 	"testing"
 
+	"github.com/testifysec/hardener/internal/policy"
 	"github.com/testifysec/hardener/internal/profile"
 )
+
+// Round 13: rule identity includes the SOURCE domain. A rule for one domain
+// must not suppress or absorb the same target/class/perm observed for a
+// DIFFERENT source (an entrypoint denial is attributed to init_t; the planned
+// multi-domain split emits several sources). Omitting source dropped or merged
+// cross-domain rules.
+func TestMergeAndNormalizeKeepDistinctSources(t *testing.T) {
+	acc := []policy.AllowRule{
+		{Source: "app_t", Target: "etc_t", Class: "file", Perms: []string{"read"}},
+	}
+	// Same target/class/perm, different source domain — must be added, not
+	// swallowed by the app_t rule.
+	if n := mergeNewRules(&acc, []policy.AllowRule{
+		{Source: "init_t", Target: "etc_t", Class: "file", Perms: []string{"read"}},
+	}); n != 1 {
+		t.Errorf("a rule for a different source domain must count as new, got added=%d", n)
+	}
+	var srcs []string
+	for _, r := range acc {
+		if r.Target == "etc_t" {
+			srcs = append(srcs, r.Source)
+		}
+	}
+	if len(srcs) != 2 {
+		t.Errorf("both source domains must survive normalization, got %v", srcs)
+	}
+
+	// normalizeRules directly: two sources, one target/class → two rules.
+	out := normalizeRules([]policy.AllowRule{
+		{Source: "app_t", Target: "var_t", Class: "dir", Perms: []string{"search"}},
+		{Source: "init_t", Target: "var_t", Class: "dir", Perms: []string{"search"}},
+	})
+	if len(out) != 2 {
+		t.Errorf("rules with different sources must not merge, got %d: %+v", len(out), out)
+	}
+}
 
 // Round 12, finding #1: declaring a shared interpreter directly in the manifest
 // must NOT launder it into an entrypoint. The resolve loop now validates every

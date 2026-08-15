@@ -39,19 +39,26 @@ func FindCollisions(p *profile.Profile, baseFileContexts string) []Collision {
 		claimed[fields[0]] = contextType(fields[len(fields)-1])
 	}
 	var out []Collision
+	check := func(path, want string) {
+		base, ok := claimed[path]
+		if !ok || base == want {
+			// Not claimed, or a previous install of this same module.
+			// Re-declaring an identical spec is idempotent; treating it as a
+			// conflict would drop our own labels and quietly leave the
+			// application unconfined on re-runs.
+			return
+		}
+		out = append(out, Collision{Path: path, BaseType: base, WouldBeType: want})
+	}
 	for _, pa := range p.Paths {
-		base, ok := claimed[pa.Path]
-		if !ok {
-			continue
-		}
-		want := TypeForKind(p.Name, KindFromString(pa.Kind))
-		if base == want {
-			// A previous install of this same module. Re-declaring is
-			// idempotent; treating it as a conflict would drop our own labels
-			// and quietly leave the application unconfined on re-runs.
-			continue
-		}
-		out = append(out, Collision{Path: pa.Path, BaseType: base, WouldBeType: want})
+		check(pa.Path, TypeForKind(p.Name, KindFromString(pa.Kind)))
+	}
+	// GenerateFC also emits an _exec_t line for every executable, so an
+	// executable path the distro already claims collides just as a path claim
+	// does — an undetected duplicate spec makes semodule reject the whole
+	// module (review finding). Check executables against the exec type too.
+	for _, exe := range p.Executables {
+		check(exe, TypeForKind(p.Name, KindExec))
 	}
 	return out
 }
@@ -70,6 +77,16 @@ func GenerateFCExcluding(p *profile.Profile, cols []Collision) string {
 	for _, pa := range p.Paths {
 		if !skip[pa.Path] {
 			trimmed.Paths = append(trimmed.Paths, pa)
+		}
+	}
+	// Executables collide too (GenerateFC emits an _exec_t line per executable),
+	// so a colliding executable must be dropped from the fc as well — otherwise
+	// GenerateFC re-emits the duplicate spec we set out to exclude (review
+	// finding).
+	trimmed.Executables = nil
+	for _, exe := range p.Executables {
+		if !skip[exe] {
+			trimmed.Executables = append(trimmed.Executables, exe)
 		}
 	}
 	return GenerateFC(&trimmed)
