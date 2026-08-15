@@ -523,23 +523,38 @@ func isAppOwnedExecutable(p *profile.Profile, path string) bool {
 			return true
 		}
 	}
-	// 3. the app name appears as a path component or in the basename. This is
-	//    the required POSITIVE tie — there is NO "not in a system bin dir ⇒
-	//    app-owned" fallback, which let shared runtimes like
-	//    /usr/libexec/platform-python and /lib64/ld-linux-*.so.* through
-	//    (review finding). Every entrypoint must earn the label.
+	// 3. an EXACT app-specific component tie — the basename or a path
+	//    directory component equals the app name, or begins with the app name
+	//    followed by a separator (emby-server for app emby). No substring or
+	//    reverse-substring match: "plex" must not adopt /usr/bin/x just
+	//    because the app name contains "x" (review finding). Every entrypoint
+	//    must earn the label with a real name match.
 	appName := strings.ToLower(policy.SafeName(p.Name))
-	normName := strings.ReplaceAll(name, "-", "_")
-	if strings.Contains(normName, appName) || strings.Contains(appName, normName) {
+	matches := func(seg string) bool {
+		seg = norm(seg)
+		// Exact, or a forward prefix by a non-trivial (≥4 char) app name so a
+		// vendor dir like "plexmediaserver" ties to "plex" while a short
+		// basename ("x", "le") never ties by substring or reverse-substring.
+		return seg == appName || (len(appName) >= 4 && strings.HasPrefix(seg, appName))
+	}
+	if matches(name) {
 		return true
 	}
-	for _, seg := range strings.Split(strings.ToLower(filepath.Dir(path)), "/") {
-		seg = strings.ReplaceAll(seg, "-", "_")
-		if seg != "" && strings.Contains(seg, appName) {
+	for _, seg := range strings.Split(filepath.Dir(path), "/") {
+		if seg != "" && matches(seg) {
 			return true
 		}
 	}
 	return false
+}
+
+// norm lowercases and maps separators to underscores so path components
+// compare against the SafeName-normalized app name.
+func norm(s string) string {
+	s = strings.ToLower(s)
+	s = strings.ReplaceAll(s, "-", "_")
+	s = strings.ReplaceAll(s, ".", "_")
+	return s
 }
 
 // failEarly mirrors Run's fail closure for use before it is defined.

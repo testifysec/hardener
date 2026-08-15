@@ -104,7 +104,6 @@ func GenerateTE(p *profile.Profile) string {
 	}{
 		{kinds[KindVarLib], app + "_var_lib_t", "files_var_lib_filetrans"},
 		{kinds[KindCache], app + "_cache_t", ""},
-		{kinds[KindContent], app + "_content_t", ""},
 	} {
 		if !k.on {
 			continue
@@ -113,6 +112,18 @@ func GenerateTE(p *profile.Profile) string {
 		fmt.Fprintf(&b, "manage_files_pattern(%s, %s, %s)\n", dom, k.t, k.t)
 		fmt.Fprintf(&b, "manage_lnk_files_pattern(%s, %s, %s)\n", dom, k.t, k.t)
 		fmt.Fprintf(&b, "manage_sock_files_pattern(%s, %s, %s)\n", dom, k.t, k.t)
+	}
+	if kinds[KindContent] {
+		// Content is the application's own program tree (e.g. /opt/app): it is
+		// READ-ONLY by default. A daemon that can rewrite its own binaries is a
+		// persistence primitive (review finding). Read + traverse + execute
+		// only; any genuine write need must be a reviewed refinement, or the
+		// writable subtree must be declared as var_lib in the manifest.
+		ct := app + "_content_t"
+		fmt.Fprintf(&b, "allow %s %s:dir list_dir_perms;\n", dom, ct)
+		fmt.Fprintf(&b, "read_files_pattern(%s, %s, %s)\n", dom, ct, ct)
+		fmt.Fprintf(&b, "read_lnk_files_pattern(%s, %s, %s)\n", dom, ct, ct)
+		fmt.Fprintf(&b, "can_exec(%s, %s)\n", dom, ct)
 	}
 	if kinds[KindVarLib] {
 		fmt.Fprintf(&b, "files_var_lib_filetrans(%s, %s_var_lib_t, { dir file })\n", dom, app)

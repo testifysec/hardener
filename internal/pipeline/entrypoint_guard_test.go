@@ -49,6 +49,23 @@ func TestUnrelatedBinariesAreNotEntrypoints(t *testing.T) {
 	}
 }
 
+// The reverse-substring check let a short basename that happens to be a
+// substring of the app name pass: app "plex" would adopt /usr/bin/x because
+// "plex" contains "x". Require an exact app-specific component, not substring.
+func TestShortBasenameSubstringRejected(t *testing.T) {
+	p := prof("plex", nil)
+	for _, bad := range []string{"/usr/bin/x", "/usr/bin/le", "/usr/sbin/p"} {
+		if isAppOwnedExecutable(p, bad) {
+			t.Errorf("%s must not be adopted for app plex (reverse-substring hole)", bad)
+		}
+	}
+	// The real plex binary, declared, is still fine.
+	p2 := prof("plex", []string{"/usr/lib/plexmediaserver/Plex Media Server"})
+	if !isAppOwnedExecutable(p2, "/usr/lib/plexmediaserver/Plex Media Server") {
+		t.Error("declared plex binary must remain app-owned")
+	}
+}
+
 // Positive ties: declared executables, app-claimed trees, private app dirs,
 // and app-named binaries directly in a system bin dir.
 func TestAppOwnedExecutablesAreEntrypoints(t *testing.T) {
