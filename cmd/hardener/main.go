@@ -93,9 +93,22 @@ func checkConformance(res *pipeline.Result, t *target.Target, manifestPath strin
 	}
 }
 
+// Version metadata, stamped by the release pipeline via
+// -ldflags "-X main.version=... -X main.gitCommit=... -X main.buildTime=...".
+// An unstamped build reports "dev"; the release workflow fails closed on that.
+var (
+	version   = "dev"
+	gitCommit = "unknown"
+	buildTime = "unknown"
+)
+
 func main() {
+	if len(os.Args) >= 2 && os.Args[1] == "version" {
+		fmt.Printf("version: %s\ncommit: %s\nbuilt: %s\n", version, gitCommit, buildTime)
+		return
+	}
 	if len(os.Args) < 2 || os.Args[1] != "run" {
-		fmt.Fprintln(os.Stderr, "usage: hardener run --vm <lima-instance> --out <dir> <target.yaml>...")
+		fmt.Fprintln(os.Stderr, "usage: hardener run --vm <lima-instance> --out <dir> <target.yaml>...\n       hardener version")
 		os.Exit(2)
 	}
 	fs := flag.NewFlagSet("run", flag.ExitOnError)
