@@ -63,7 +63,7 @@ func TestBailsWhenPermissiveExerciseFailsWithNoDenials(t *testing.T) {
 	f := &fakeRunner{
 		responses: map[string]string{
 			"getenforce":        "Enforcing\nactive",
-			"stat -c %s":        "0",
+			"stat -c '%s %i'":   "0 4242",
 			"systemctl restart": "",
 		},
 		failOn: []string{"EXERCISE_MARKER"}, // the exercise script fails

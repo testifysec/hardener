@@ -7,6 +7,7 @@ import (
 	"path/filepath"
 	"slices"
 	"sort"
+	"strconv"
 	"strings"
 
 	"github.com/testifysec/hardener/internal/avc"
@@ -517,6 +518,16 @@ func failEarly(res *Result, opts Options, stage string, err error) *Result {
 	return res
 }
 
+// sizeShrank reports whether the post size is smaller than the pre offset.
+func sizeShrank(pre, post string) bool {
+	a, err1 := strconv.Atoi(strings.TrimSpace(pre))
+	b, err2 := strconv.Atoi(strings.TrimSpace(post))
+	if err1 != nil || err2 != nil {
+		return false
+	}
+	return b < a
+}
+
 // hasLine reports whether any whole line of out equals want.
 func hasLine(out, want string) bool {
 	for _, line := range strings.Split(out, "\n") {
@@ -588,11 +599,15 @@ func reconcileStalePorts(r vm.Runner, p *profile.Profile) {
 // captured by byte offset into audit.log — ausearch time filtering proved
 // unreliable (returned "no matches" with matching records present).
 func exercise(r vm.Runner, t *target.Target, dom string) ([]avc.Denial, bool, string, error) {
-	off, err := r.Run("sudo stat -c %s /var/log/audit/audit.log")
+	pre, err := r.Run("sudo stat -c '%s %i' /var/log/audit/audit.log")
 	if err != nil {
 		return nil, false, "", fmt.Errorf("audit log offset: %w", err)
 	}
-	offset := strings.TrimSpace(off)
+	preFields := strings.Fields(strings.TrimSpace(pre))
+	if len(preFields) != 2 {
+		return nil, false, "", fmt.Errorf("audit log stat: unexpected %q", pre)
+	}
+	offset, startInode := preFields[0], preFields[1]
 	if _, err := r.Run("sudo systemctl reset-failed " + t.Unit + " 2>/dev/null; true"); err != nil {
 		return nil, false, "", err
 	}
@@ -606,6 +621,20 @@ func exercise(r vm.Runner, t *target.Target, dom string) ([]avc.Denial, bool, st
 		exOK = exErr == nil
 	}
 	_, _ = r.Run(fmt.Sprintf("sudo systemctl stop %s 2>/dev/null; true", t.Unit))
+	// Fail closed on log rotation/truncation: a new inode or a shrunk file
+	// means our byte offset is stale and a plain tail would silently miss AVC
+	// records, reporting a false zero-denial pass (review finding).
+	post, err := r.Run("sudo stat -c '%s %i' /var/log/audit/audit.log")
+	if err != nil {
+		return nil, exOK, label, fmt.Errorf("audit log re-stat: %w", err)
+	}
+	postFields := strings.Fields(strings.TrimSpace(post))
+	if len(postFields) != 2 || postFields[1] != startInode {
+		return nil, exOK, label, fmt.Errorf("audit log rotated during exercise (inode %s→%v) — re-run", startInode, postFields)
+	}
+	if sizeShrank(offset, postFields[0]) {
+		return nil, exOK, label, fmt.Errorf("audit log truncated during exercise (%s→%s bytes) — re-run", offset, postFields[0])
+	}
 	out, err := r.Run(fmt.Sprintf(`sudo tail -c +%s /var/log/audit/audit.log 2>/dev/null | grep -E '^type=(AVC|SELINUX_ERR|PATH)'; true`, "$(("+offset+"+1))"))
 	if err != nil {
 		return nil, exOK, label, err

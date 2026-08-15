@@ -10,7 +10,7 @@ import (
 func passingRunner() *fakeRunner {
 	return &fakeRunner{responses: map[string]string{
 		"getenforce":                "Enforcing\nactive",
-		"stat -c %s":                "0",
+		"stat -c '%s %i'":           "0 4242",
 		"MainPID":                   "system_u:system_r:widget_t:s0",
 		"command -v sesearch":       "TOOLS_OK",
 		"sesearch -A -s init_t":     "allow init_t bin_t:file execute;",

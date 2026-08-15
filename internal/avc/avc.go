@@ -19,6 +19,7 @@ type Denial struct {
 	TargetType string // type portion of tcontext
 	Class      string // file, dir, tcp_socket, capability, ...
 	Src        int    // source port for name_bind denials
+	Ino        string // target inode (used to correlate the sibling PATH record)
 	Permissive bool
 }
 
@@ -39,21 +40,38 @@ func ParseLogWithPaths(log string) []Denial {
 		event string
 	}
 	var ds []indexed
-	paths := map[string]string{} // event id → first PATH name
+	// event id → inode → PATH name, plus a per-event fallback used only when
+	// exactly one PATH record exists (so a single-item event still correlates
+	// even if the AVC reported no inode).
+	byInode := map[string]map[string]string{}
+	loneName := map[string]string{}
+	loneCount := map[string]int{}
 	for _, line := range strings.Split(log, "\n") {
 		ev := ""
 		if m := eventRe.FindStringSubmatch(line); m != nil {
 			ev = m[1]
 		}
 		if strings.Contains(line, "type=PATH") && ev != "" {
-			if _, seen := paths[ev]; !seen {
-				for _, f := range fieldRe.FindAllStringSubmatch(line, -1) {
-					if f[1] == "name" {
-						paths[ev] = strings.Trim(f[2], `"`)
-						break
-					}
+			var name, inode string
+			for _, f := range fieldRe.FindAllStringSubmatch(line, -1) {
+				switch f[1] {
+				case "name":
+					name = strings.Trim(f[2], `"`)
+				case "inode":
+					inode = strings.Trim(f[2], `"`)
 				}
 			}
+			if name == "" {
+				continue
+			}
+			if byInode[ev] == nil {
+				byInode[ev] = map[string]string{}
+			}
+			if inode != "" {
+				byInode[ev][inode] = name
+			}
+			loneName[ev] = name
+			loneCount[ev]++
 			continue
 		}
 		if d, err := ParseLine(line); err == nil {
@@ -63,8 +81,15 @@ func ParseLogWithPaths(log string) []Denial {
 	out := make([]Denial, 0, len(ds))
 	for _, x := range ds {
 		if x.d.Path == "" && x.event != "" {
-			if p, ok := paths[x.event]; ok {
-				x.d.Path = p
+			// Prefer an exact inode match; fall back to the sole PATH name
+			// only when the event has exactly one. Never guess among several.
+			if x.d.Ino != "" && byInode[x.event] != nil {
+				if name, ok := byInode[x.event][x.d.Ino]; ok {
+					x.d.Path = name
+				}
+			}
+			if x.d.Path == "" && loneCount[x.event] == 1 {
+				x.d.Path = loneName[x.event]
 			}
 		}
 		out = append(out, x.d)
@@ -99,6 +124,8 @@ func ParseLine(line string) (*Denial, error) {
 			d.Class = val
 		case "src":
 			d.Src, _ = strconv.Atoi(val)
+		case "ino":
+			d.Ino = val
 		case "permissive":
 			d.Permissive = val == "1"
 		}

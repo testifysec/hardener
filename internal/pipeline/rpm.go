@@ -41,6 +41,13 @@ func GenerateSpec(p *profile.Profile) string {
 	for _, root := range RelabelRoots(p) {
 		fmt.Fprintf(&relabel, "restorecon -RF %q 2>/dev/null || :\n", root)
 	}
+	// The entrypoint label is load-bearing: without _exec_t the domain
+	// transition never fires and the service runs unconfined. Relabel it
+	// explicitly and FAIL the scriptlet if the label cannot be applied —
+	// unlike the best-effort relabels above (review finding).
+	for _, exe := range p.Executables {
+		fmt.Fprintf(&relabel, "restorecon -F %q || { echo \"ERROR: cannot label entrypoint %s; the service would run unconfined\" >&2; exit 1; }\n", exe, exe)
+	}
 	var ports strings.Builder
 	var portsDel strings.Builder
 	for _, port := range p.Ports {

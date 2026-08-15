@@ -157,7 +157,7 @@ func dropFlagged(rules []AllowRule, flags []Flag) []AllowRule {
 }
 
 func dangerReason(r AllowRule) string {
-	if r.Class == "capability" || r.Class == "capability2" {
+	if isCapabilityClass(r.Class) {
 		for _, p := range r.Perms {
 			if dangerousPerms[p] {
 				return "privileged capability: " + p
@@ -209,13 +209,10 @@ type fcMatcher struct {
 
 func compileFCMatchers(p *profile.Profile) []fcMatcher {
 	var ms []fcMatcher
-	for _, pa := range p.Paths {
-		re, err := regexp.Compile("^" + pa.Path + "$")
-		if err != nil {
-			continue
-		}
-		ms = append(ms, fcMatcher{re, TypeForKind(p.Name, KindFromString(pa.Kind))})
-	}
+	// Exact executable matchers FIRST: an executable path also matches the
+	// app's broad content/tree claim, and expectedType returns the first
+	// match. Checking exact matchers first keeps a correctly-labeled _exec_t
+	// helper from being misread as relabel drift (review finding).
 	for _, exe := range p.Executables {
 		re, err := regexp.Compile("^" + regexp.QuoteMeta(exe) + "$")
 		if err != nil {
@@ -223,7 +220,24 @@ func compileFCMatchers(p *profile.Profile) []fcMatcher {
 		}
 		ms = append(ms, fcMatcher{re, TypeForKind(p.Name, KindExec)})
 	}
+	for _, pa := range p.Paths {
+		re, err := regexp.Compile("^" + pa.Path + "$")
+		if err != nil {
+			continue
+		}
+		ms = append(ms, fcMatcher{re, TypeForKind(p.Name, KindFromString(pa.Kind))})
+	}
 	return ms
+}
+
+// isCapabilityClass covers the SELinux capability object classes, including
+// the user-namespace variants a confined domain can also exercise.
+func isCapabilityClass(c string) bool {
+	switch c {
+	case "capability", "capability2", "cap_userns", "cap2_userns":
+		return true
+	}
+	return false
 }
 
 func expectedType(ms []fcMatcher, path string) (string, bool) {
