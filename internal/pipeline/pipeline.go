@@ -365,17 +365,30 @@ func Run(r vm.Runner, t *target.Target, opts Options) *Result {
 	res.FinalProfile = p
 	res.FinalRules = extraRules
 
-	// 6. Package as RPM.
+	// An unaccepted static-check failure fails the run. The report shows it
+	// either way, but evidence must fail closed: a verdict that says pass
+	// while sesearch proved forbidden access would let a verdict-only deploy
+	// gate fail open (PR-review finding).
+	for _, c := range res.StaticChecks {
+		if !c.Passed {
+			return fail("static-check", fmt.Errorf("%s: %s", c.Name, firstLine(c.Detail)))
+		}
+	}
+
+	// 6. Package as RPM. Packaging failures also fail closed: a passing run
+	// with no subject artifact is an attestation about nothing.
 	if res.EnforceOK {
 		rpm, err := buildRPM(r, p)
 		if err != nil {
-			opts.Log("[%s] rpmbuild failed: %v", t.Name, err)
-		} else {
-			res.RPMPath = rpm
-			if out, err := r.Run(fmt.Sprintf("sha256sum %q", rpm)); err == nil {
-				res.RPMSHA256 = strings.Fields(out)[0]
-			}
+			return fail("rpmbuild", err)
 		}
+		res.RPMPath = rpm
+		out, err := r.Run(fmt.Sprintf("sha256sum %q", rpm))
+		fields := strings.Fields(out)
+		if err != nil || len(fields) == 0 {
+			return fail("rpm-digest", fmt.Errorf("sha256sum %s: %v", rpm, err))
+		}
+		res.RPMSHA256 = fields[0]
 	}
 	return res
 }
