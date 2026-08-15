@@ -226,6 +226,29 @@ Mixed licensing, all freely downloadable, all Linux aarch64:
 MongoDB was evaluated and dropped: the distro policy already defines
 `mongod_t`, so it is outside the product's target class (already confined).
 
+## Releases
+
+Signed binaries ship from **dist.testifysec.com** (authenticated SFTP + web
+portal; contact TestifySec for access). Every release is built by a
+cilock-attested pipeline and arrives with everything needed to verify it
+offline — the binary, its sha256, an in-toto/DSSE attestation bundle, a
+signed verify policy pinning the exact build workflow and tag, and the
+`cilock` verifier itself:
+
+```bash
+mkdir attestations && tar -xzf hardener-<ver>-linux-amd64.intoto.tgz -C attestations
+./cilock-linux-amd64 verify hardener-<ver>-linux-amd64 \
+  --policy hardener-<ver>-linux-amd64.policy.json.signed \
+  --policy-ca-roots platform-testifysec-fulcio-root.pem \
+  --policy-timestamp-servers platform-testifysec-tsa-root.pem \
+  --attestations attestations/clone.attestation.json,attestations/build.attestation.json
+```
+
+Verification asserts the binary you hold was produced by the pinned release
+workflow on the pinned tag pattern, keyless-signed via Fulcio with an RFC
+3161 timestamp — no shared key material. Or skip all of it and build from
+source; that is the point of the license.
+
 ## License
 
 Apache-2.0. The corpus manifests download third-party software from vendor
