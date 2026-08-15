@@ -18,6 +18,7 @@ func TestParseFileDenial(t *testing.T) {
 		SourceType: "widget_t",
 		TargetType: "etc_t",
 		Class:      "file",
+		Ino:        "5678",
 		Permissive: true,
 	}
 	if !reflect.DeepEqual(*d, want) {
