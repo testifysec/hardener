@@ -1,0 +1,89 @@
+package pipeline
+
+import (
+	"strings"
+	"testing"
+
+	"github.com/testifysec/hardener/internal/profile"
+)
+
+// Round 12, finding #1: declaring a shared interpreter directly in the manifest
+// must NOT launder it into an entrypoint. The resolve loop now validates every
+// executable — including unchanged (non-symlink) paths — so the interpreter
+// blacklist has to win over the declared-executable tie, or a manifest naming
+// /usr/bin/bash would relabel the shell into the app domain.
+func TestDeclaredSharedInterpreterStillRejected(t *testing.T) {
+	for _, bad := range []string{"/usr/bin/bash", "/bin/sh", "/usr/bin/python3", "/usr/bin/env"} {
+		p := &profile.Profile{Name: "myapp", Executables: []string{bad}}
+		if isAppOwnedExecutable(p, bad) {
+			t.Errorf("declaring %s directly must not make it app-owned (interpreter blacklist must beat the declared tie)", bad)
+		}
+	}
+	// A genuinely app-owned declared binary is still accepted.
+	p := &profile.Profile{Name: "myapp", Executables: []string{"/opt/myapp/bin/myappd"}}
+	if !isAppOwnedExecutable(p, "/opt/myapp/bin/myappd") {
+		t.Error("a real app-owned declared entrypoint must remain app-owned")
+	}
+}
+
+// Round 12, finding #2: a static-verification query that FAILS to execute must
+// fail closed. Appending "; true" and discarding the error made a broken
+// sesearch query (empty output, non-zero exit) indistinguishable from a clean
+// "no denials" result, so a domain could be recorded as passing when
+// verification never actually ran.
+func TestStaticCheckFailsClosedWhenQueryErrors(t *testing.T) {
+	f := &fakeRunner{
+		responses: map[string]string{
+			"command -v sesearch": "TOOLS_OK",                         // tooling gate
+			"-s init_t":           "allow init_t bin_t:file execute;", // canary non-empty
+		},
+		// The shadow_t query cannot run (tool crash / bad policy). It must NOT
+		// be read as "no shadow access".
+		failOn: []string{"-t shadow_t"},
+	}
+	checks := staticChecks(f, "myapp_t")
+
+	var shadow, etc *StaticCheck
+	for i := range checks {
+		switch {
+		case strings.Contains(checks[i].Name, "shadow_t"):
+			shadow = &checks[i]
+		case strings.Contains(checks[i].Name, "etc_t"):
+			etc = &checks[i]
+		}
+	}
+	if shadow == nil || etc == nil {
+		t.Fatalf("expected shadow_t and etc_t checks, got %+v", checks)
+	}
+	if shadow.Passed {
+		t.Errorf("a sesearch query that failed to execute must fail closed, got Passed=true: %+v", *shadow)
+	}
+	if !strings.Contains(shadow.Detail, "fail-closed") {
+		t.Errorf("failed query should be labeled fail-closed, got detail %q", shadow.Detail)
+	}
+	// A query that ran cleanly and matched nothing is still a genuine pass —
+	// the fix must not turn every check into a failure.
+	if !etc.Passed {
+		t.Errorf("a clean empty query must still pass, got %+v", *etc)
+	}
+}
+
+// The permissive check greps a list and legitimately exits non-zero when the
+// domain is absent (the safe outcome). That non-zero exit must be read as
+// "pass", not as a query-execution failure.
+func TestPermissiveCheckPassesOnNoGrepMatch(t *testing.T) {
+	f := &fakeRunner{
+		responses: map[string]string{
+			"command -v sesearch": "TOOLS_OK",
+			"-s init_t":           "allow init_t bin_t:file execute;",
+		},
+		// grep with no match exits 1.
+		failOn: []string{"semanage permissive"},
+	}
+	checks := staticChecks(f, "myapp_t")
+	for _, c := range checks {
+		if strings.Contains(c.Name, "permissive") && !c.Passed {
+			t.Errorf("permissive check must pass when the domain is not in the permissive list (grep no-match), got %+v", c)
+		}
+	}
+}
