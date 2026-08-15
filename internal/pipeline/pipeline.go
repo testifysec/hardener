@@ -55,6 +55,10 @@ type Result struct {
 	// FlagsAccepted records whether --accept-flagged consciously applied the
 	// review-flagged rules; a verdict with unaccepted flags must fail.
 	FlagsAccepted bool
+	// EntrypointDigests maps each resolved entrypoint path to its sha256 as
+	// installed in the verifier — the exact bytes exercised, bound into the
+	// verdict attestation.
+	EntrypointDigests map[string]string
 	// Conformance is filled by the caller per party class; rendered in the report.
 	Party             string
 	ConformanceUndecl []string
@@ -65,6 +69,15 @@ type Result struct {
 	AcceptedExceptions []StaticCheck
 	RPMPath            string
 	FailureReason      string
+}
+
+// IsFailure is the single source of truth for whether a run failed: a hard
+// stage error, a failed enforcement gate, a fatal conformance verdict, or
+// review-flagged rules that were never accepted. The CLI exit status, the
+// report headline, and the attestation verdict all derive from this.
+func (res *Result) IsFailure() bool {
+	return res.FailureReason != "" || !res.EnforceOK || res.ConformanceFatal != "" ||
+		(len(res.Flags) > 0 && !res.FlagsAccepted)
 }
 
 // RoundResult records one permissive observation round.
@@ -175,6 +188,14 @@ func Run(r vm.Runner, t *target.Target, opts Options) *Result {
 		}
 		if real != exe {
 			opts.Log("[%s] executable %s is a symlink → %s (labeling target)", t.Name, exe, real)
+			// A symlink can resolve to a shared runtime (/opt/app/launcher ->
+			// /bin/sh). Labeling that target as _exec_t would route every use
+			// of the shell into this domain — re-validate the resolved inode
+			// and drop it if it is not itself app-owned (review finding).
+			if !isAppOwnedExecutable(p, real) {
+				opts.Log("[%s] resolved target %s is not app-owned — refusing to label a shared binary; declare the real entrypoint", t.Name, real)
+				continue
+			}
 		}
 		if !seen[real] {
 			seen[real] = true
@@ -182,6 +203,15 @@ func Run(r vm.Runner, t *target.Target, opts Options) *Result {
 		}
 	}
 	p.Executables = resolved
+	// Fingerprint the resolved entrypoints as installed — bound into the verdict.
+	res.EntrypointDigests = map[string]string{}
+	for _, exe := range p.Executables {
+		if out, err := r.Run(fmt.Sprintf("sha256sum %q 2>/dev/null", exe)); err == nil {
+			if fs := strings.Fields(out); len(fs) > 0 && len(fs[0]) == 64 {
+				res.EntrypointDigests[exe] = fs[0]
+			}
+		}
+	}
 
 	// A unit with NoNewPrivileges=yes restricts SELinux to bounded transitions,
 	// which a generated domain can never satisfy: the service keeps running as

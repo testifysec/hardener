@@ -15,8 +15,7 @@ func RenderReport(res *Result) string {
 	if len(res.AcceptedExceptions) > 0 || (len(res.Flags) > 0 && res.FlagsAccepted) {
 		status = "PASS (with accepted exceptions)"
 	}
-	if res.FailureReason != "" || !res.EnforceOK || res.ConformanceFatal != "" ||
-		(len(res.Flags) > 0 && !res.FlagsAccepted) {
+	if res.IsFailure() {
 		status = "FAIL"
 	}
 	fmt.Fprintf(&b, "**Overall: %s**\n\n", status)

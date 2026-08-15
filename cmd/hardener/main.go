@@ -165,7 +165,11 @@ func main() {
 			Distro: res.VerifierEnv["distro"], Kernel: res.VerifierEnv["kernel"],
 			Mode: res.VerifierEnv["selinuxMode"], PolicyPackage: res.VerifierEnv["policyPackage"],
 		}
-		stJSON, err := json.MarshalIndent(verdict.Build(res, env, subjects), "", "  ")
+		st, err := verdict.BuildOrErr(res, env, subjects)
+		if err != nil {
+			log.Fatalf("build verdict: %v", err)
+		}
+		stJSON, err := json.MarshalIndent(st, "", "  ")
 		if err != nil {
 			log.Fatal(err)
 		}
@@ -195,11 +199,14 @@ func main() {
 		} else if *archivistaURL != "" {
 			log.Fatal("--archivista-url requires --sign-key: unsigned attestations are not worth storing")
 		}
-		if res.FailureReason != "" || !res.EnforceOK || res.ConformanceFatal != "" {
+		if res.IsFailure() {
 			failures++
 			why := res.FailureReason
 			if why == "" {
 				why = res.ConformanceFatal
+			}
+			if why == "" && len(res.Flags) > 0 && !res.FlagsAccepted {
+				why = fmt.Sprintf("%d review-flagged rules not accepted", len(res.Flags))
 			}
 			if why == "" {
 				why = "enforcing verification failed"

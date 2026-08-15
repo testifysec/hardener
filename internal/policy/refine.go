@@ -68,6 +68,13 @@ var dangerousPerms = map[string]bool{
 	"net_admin": true, "sys_boot": true, "mknod": true, "audit_write": true,
 }
 
+// dangerousProcessPerms are high-impact permissions on the process class:
+// executable memory (defeats W^X), stack/heap exec, and ptrace. They are not
+// capability-class, so the capability-only check missed them.
+var dangerousProcessPerms = map[string]bool{
+	"execmem": true, "execstack": true, "execheap": true, "ptrace": true,
+}
+
 var dangerousTargets = map[string]bool{
 	"shadow_t": true, "etc_t": true, "security_t": true, "kernel_t": true,
 	"init_t": true, "memory_device_t": true, "fixed_disk_device_t": true,
@@ -161,6 +168,13 @@ func dangerReason(r AllowRule) string {
 		for _, p := range r.Perms {
 			if dangerousPerms[p] {
 				return "privileged capability: " + p
+			}
+		}
+	}
+	if r.Class == "process" || r.Class == "process2" {
+		for _, p := range r.Perms {
+			if dangerousProcessPerms[p] {
+				return "high-impact process permission: " + p
 			}
 		}
 	}
