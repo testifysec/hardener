@@ -142,7 +142,15 @@ func Refine(p *profile.Profile, denials []avc.Denial) Refinement {
 			// A foreign domain denied execute on one of our types means we
 			// labeled an entrypoint as content — fatal, and invisible if we
 			// only ever look at denials sourced from our own domain.
-			if own[d.TargetType] && isFileClass(d.Class) && hasPerm(d.Perms, "execute") {
+			// A mislabeled entrypoint got a NON-exec owned type (e.g.
+			// content_t) instead of _exec_t, so the unit LAUNCHER (init_t) is
+			// denied execute on it. Scope tightly: only the launcher domain and
+			// only non-exec owned types — a correctly-labeled _exec_t, or an
+			// unrelated foreign domain like sshd_t, is expected noise, not a
+			// broken entrypoint (review finding).
+			if isLauncherDomain(d.SourceType) && own[d.TargetType] &&
+				!strings.HasSuffix(d.TargetType, "_exec_t") &&
+				isFileClass(d.Class) && hasPerm(d.Perms, "execute") {
 				res.Entrypoints = append(res.Entrypoints, EntrypointIssue{
 					Name: entrypointName(d), SourceType: d.SourceType, ObservedType: d.TargetType,
 				})
@@ -229,6 +237,16 @@ func dangerReason(r AllowRule) string {
 		}
 	}
 	return ""
+}
+
+// isLauncherDomain covers the systemd/init domains that perform the
+// exec-time domain transition for a service unit.
+func isLauncherDomain(t string) bool {
+	switch t {
+	case "init_t", "initrc_t", "systemd_generator_t":
+		return true
+	}
+	return false
 }
 
 func hasPerm(perms []string, want string) bool {
