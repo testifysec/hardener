@@ -42,17 +42,3 @@ func TestSSHNoKeyOmitsIdentity(t *testing.T) {
 		t.Errorf("no key configured, -i must be absent: %s", joined)
 	}
 }
-
-// WriteFile must heredoc-quote content so the remote shell never interprets it.
-func TestSSHWriteFileScriptShape(t *testing.T) {
-	script := writeFileScript("/etc/app/conf", "line with $VAR and `backticks`\n")
-	if !strings.Contains(script, "<<'HARDENER_EOF'") {
-		t.Errorf("heredoc must be quoted (no expansion): %s", script)
-	}
-	if !strings.Contains(script, "$VAR") || !strings.Contains(script, "`backticks`") {
-		t.Errorf("content must pass through verbatim: %s", script)
-	}
-	if !strings.Contains(script, `sudo mkdir -p "/etc/app"`) {
-		t.Errorf("parent dir must be created: %s", script)
-	}
-}

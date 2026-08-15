@@ -1,6 +1,7 @@
 package vm
 
 import (
+	"encoding/base64"
 	"fmt"
 	"os/exec"
 	"path/filepath"
@@ -67,9 +68,20 @@ func (s *SSH) WriteFile(path, content string) error {
 	return err
 }
 
-// writeFileScript renders the remote write with a quoted heredoc so content
-// passes through verbatim — no expansion of $vars or backticks server-side.
+// writeFileScript renders the remote write as base64 over the command, decoded
+// to the target with tee. A fixed heredoc delimiter was unsafe: content
+// containing a line equal to the delimiter would terminate it early and run
+// the remainder as shell — with passwordless sudo (review finding). base64's
+// alphabet has no shell metacharacters, so embedding it is safe; paths are
+// single-quoted with shellQuote (no Go %q expansion hazards).
 func writeFileScript(path, content string) string {
-	return fmt.Sprintf("sudo mkdir -p %q && sudo tee %q > /dev/null <<'HARDENER_EOF'\n%s\nHARDENER_EOF",
-		filepath.Dir(path), path, content)
+	b64 := base64.StdEncoding.EncodeToString([]byte(content))
+	return fmt.Sprintf("sudo mkdir -p %s && printf %%s %s | base64 -d | sudo tee %s > /dev/null",
+		shellQuote(filepath.Dir(path)), b64, shellQuote(path))
+}
+
+// shellQuote single-quotes s for POSIX shells. An embedded single quote is
+// rendered as '\” — close the quote, an escaped literal quote, reopen.
+func shellQuote(s string) string {
+	return "'" + strings.ReplaceAll(s, "'", `'\''`) + "'"
 }

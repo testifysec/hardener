@@ -158,6 +158,15 @@ func Refine(p *profile.Profile, denials []avc.Denial) Refinement {
 		}
 		rule := AllowRule{Source: dom, Target: d.TargetType, Class: d.Class, Perms: perms}
 		reason := dangerReason(rule)
+		// Self-modification of read-only program files: a write/create/unlink
+		// to the app's OWN content_t or exec_t defeats the read-only intent of
+		// GenerateTE (a persistence primitive) and must go to review rather
+		// than auto-apply (review finding).
+		if reason == "" && own[d.TargetType] &&
+			(strings.HasSuffix(d.TargetType, "_content_t") || strings.HasSuffix(d.TargetType, "_exec_t")) &&
+			!allReadOnly(perms) {
+			reason = "self-modification of read-only program files: " + d.TargetType
+		}
 		// Foreign-type access defaults to review. A type that is neither ours,
 		// a port type, nor on the curated safe allowlist is an unknown grant —
 		// it must not fail open the way the finite blocklists did (a read of

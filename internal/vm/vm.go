@@ -50,9 +50,7 @@ func (l *Lima) Run(script string) (string, error) {
 }
 
 func (l *Lima) WriteFile(path, content string) error {
-	script := fmt.Sprintf("sudo mkdir -p %q && sudo tee %q > /dev/null <<'HARDENER_EOF'\n%s\nHARDENER_EOF",
-		dirOf(path), path, content)
-	_, err := l.Run(script)
+	_, err := l.Run(writeFileScript(path, content))
 	return err
 }
 

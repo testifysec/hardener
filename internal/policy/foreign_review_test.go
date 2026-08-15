@@ -69,3 +69,37 @@ func TestWriteToSafeForeignTypeFlagged(t *testing.T) {
 		}
 	}
 }
+
+// A daemon writing its OWN content/exec files must go to review, not auto-
+// apply: GenerateTE makes those read-only precisely to deny self-modification
+// (a persistence primitive). Own-type WRITE denials previously slipped the
+// gate because only foreign types reached the fallback flag.
+func TestMutatingOwnContentExecFlagged(t *testing.T) {
+	p := widgetProfile()
+	for _, tc := range []struct{ typ, perm string }{
+		{"widget_content_t", "write"},
+		{"widget_content_t", "unlink"},
+		{"widget_exec_t", "write"},
+		{"widget_exec_t", "append"},
+	} {
+		ds := []avc.Denial{{
+			SourceType: "widget_t", TargetType: tc.typ, Class: "file", Perms: []string{tc.perm},
+		}}
+		res := Refine(p, ds)
+		if len(res.Flags) != 1 {
+			t.Errorf("%s:file %s (self-modification) must be flagged: %+v", tc.typ, tc.perm, res.Flags)
+		}
+	}
+}
+
+// Reading/executing own content is fine (that's the point) — not flagged.
+func TestReadingOwnContentNotFlagged(t *testing.T) {
+	p := widgetProfile()
+	ds := []avc.Denial{{
+		SourceType: "widget_t", TargetType: "widget_content_t", Class: "file",
+		Perms: []string{"read", "open", "execute"},
+	}}
+	if res := Refine(p, ds); len(res.Flags) != 0 {
+		t.Errorf("reading/executing own content must not be flagged: %+v", res.Flags)
+	}
+}
