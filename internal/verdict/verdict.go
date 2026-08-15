@@ -16,6 +16,7 @@ import (
 	"fmt"
 	"path/filepath"
 	"regexp"
+	"sort"
 
 	"github.com/testifysec/hardener/internal/pipeline"
 	"github.com/testifysec/hardener/internal/policy"
@@ -152,8 +153,15 @@ func BuildOrErr(res *pipeline.Result, env Env, extra []Subject) (Statement, erro
 			return Statement{}, err
 		}
 	}
-	for path, digest := range res.EntrypointDigests {
-		if err := add(path, digest); err != nil {
+	// Sorted so identical inputs produce byte-identical statements and DSSE
+	// signatures — map iteration order is otherwise random (review finding).
+	epPaths := make([]string, 0, len(res.EntrypointDigests))
+	for path := range res.EntrypointDigests {
+		epPaths = append(epPaths, path)
+	}
+	sort.Strings(epPaths)
+	for _, path := range epPaths {
+		if err := add(path, res.EntrypointDigests[path]); err != nil {
 			return Statement{}, err
 		}
 	}

@@ -1,6 +1,7 @@
 package verdict
 
 import (
+	"encoding/json"
 	"strings"
 	"testing"
 )
@@ -74,5 +75,29 @@ func TestPassingVerdictRequiresArtifactSubject(t *testing.T) {
 	r.EntrypointDigests = map[string]string{"/usr/sbin/widgetd": goodSHA}
 	if _, err := BuildOrErr(r, Env{}, nil); err != nil {
 		t.Fatalf("entrypoint-bound passing verdict must be accepted: %v", err)
+	}
+}
+
+// Identical inputs must produce byte-identical statements — a map iteration
+// over entrypoint digests would otherwise reorder subjects and change the
+// DSSE signature (review finding).
+func TestStatementIsDeterministic(t *testing.T) {
+	r := passingResult()
+	r.EntrypointDigests = map[string]string{
+		"/usr/sbin/a": goodSHA, "/usr/sbin/b": goodSHA, "/usr/sbin/c": goodSHA,
+		"/usr/sbin/d": goodSHA, "/usr/sbin/e": goodSHA,
+	}
+	var first []byte
+	for i := 0; i < 20; i++ {
+		st, err := BuildOrErr(r, Env{Mode: "Enforcing"}, nil)
+		if err != nil {
+			t.Fatal(err)
+		}
+		raw, _ := json.Marshal(st)
+		if first == nil {
+			first = raw
+		} else if string(raw) != string(first) {
+			t.Fatalf("statement bytes differ across builds (non-deterministic subject order)")
+		}
 	}
 }
