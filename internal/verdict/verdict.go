@@ -210,6 +210,20 @@ func BuildOrErr(res *pipeline.Result, env Env, extra []Subject) (Statement, erro
 		p.Collisions = append(p.Collisions, c.Render())
 	}
 
+	// A passing verdict must bind to the exercised artifact — the policy RPM
+	// or the entrypoint bytes — not only the .te/.fc policy text. Otherwise
+	// the attestation certifies a policy with no link to what gets installed.
+	if p.Verdict != "fail" {
+		hasArtifact := len(res.EntrypointDigests) > 0
+		for _, s := range extra {
+			hasArtifact = true
+			_ = s
+		}
+		if !hasArtifact {
+			return Statement{}, fmt.Errorf("passing verdict has no artifact subject (RPM or entrypoint bytes); refusing to attest a policy bound to nothing exercised")
+		}
+	}
+
 	return Statement{
 		Type: "https://in-toto.io/Statement/v1", Subject: subjects,
 		PredicateType: PredicateType, Predicate: p,

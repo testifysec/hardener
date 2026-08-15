@@ -61,11 +61,13 @@ type Refinement struct {
 	Entrypoints []EntrypointIssue
 }
 
-// dangerous permissions / target types that always require human review.
-var dangerousPerms = map[string]bool{
-	"sys_admin": true, "sys_module": true, "sys_rawio": true, "sys_ptrace": true,
-	"dac_override": true, "dac_read_search": true, "setuid": true, "setgid": true,
-	"net_admin": true, "sys_boot": true, "mknod": true, "audit_write": true,
+// safeCapabilities is the ALLOWLIST: capabilities a confined daemon may hold
+// without human review. Everything else is privilege worth a look — a
+// blocklist silently passed audit_control, bpf, perfmon, setpcap, setfcap,
+// and every future capability (review finding). net_bind_service (bind a port
+// below 1024) is the one routine, low-blast-radius capability.
+var safeCapabilities = map[string]bool{
+	"net_bind_service": true,
 }
 
 // dangerousProcessPerms are high-impact permissions on the process class:
@@ -166,8 +168,8 @@ func dropFlagged(rules []AllowRule, flags []Flag) []AllowRule {
 func dangerReason(r AllowRule) string {
 	if isCapabilityClass(r.Class) {
 		for _, p := range r.Perms {
-			if dangerousPerms[p] {
-				return "privileged capability: " + p
+			if !safeCapabilities[p] {
+				return "capability requiring review: " + p
 			}
 		}
 	}

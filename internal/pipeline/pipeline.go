@@ -389,8 +389,16 @@ func Run(r vm.Runner, t *target.Target, opts Options) *Result {
 			}
 		}
 		res.Flags = append(res.Flags, ref.Flags...)
-		if mergeNewRules(&extraRules, rules) == 0 {
-			break // no new grants derivable; retrying would loop forever
+		// Late paths can need a relabel rather than a rule; apply and record
+		// those, and count them as progress so a relabel-only round does not
+		// falsely abort the advertised late-path recovery (review finding).
+		newRules := mergeNewRules(&extraRules, rules)
+		res.Relabels = append(res.Relabels, ref.Relabels...)
+		for _, rl := range ref.Relabels {
+			_, _ = r.Run(fmt.Sprintf("sudo restorecon -F %q", rl.Path))
+		}
+		if newRules == 0 && len(ref.Relabels) == 0 {
+			break // genuinely nothing new — neither a rule nor a relabel
 		}
 		opts.Log("[%s] enforcing attempt %d had %d residual denials — refining and retrying", t.Name, attempt, len(denials))
 		te := policy.GenerateTE(p) + policy.RenderRefinedSection(p, extraRules)
@@ -485,12 +493,6 @@ func relabelSignature(rs []policy.Relabel) string {
 	return strings.Join(paths, ",")
 }
 
-// systemBinDirs hold shared runtimes and OS binaries. A path directly under
-// one is only an app-owned entrypoint if its basename positively ties to the
-// application (an incomplete interpreter blacklist is not enough: python3.11,
-// node, ruby, java all live here). Reject bare interpreters outright.
-var systemBinDirs = []string{"/bin/", "/usr/bin/", "/sbin/", "/usr/sbin/", "/usr/local/bin/"}
-
 var sharedInterpreters = map[string]bool{
 	"sh": true, "bash": true, "dash": true, "ash": true, "zsh": true,
 	"env": true, "perl": true, "python": true, "ruby": true, "node": true,
@@ -521,24 +523,23 @@ func isAppOwnedExecutable(p *profile.Profile, path string) bool {
 			return true
 		}
 	}
-	// 3. under a private application tree (/opt/<x>, /usr/lib*/<x>, /usr/libexec/<x>),
-	//    which is not a shared system bin dir.
-	underSystemBin := false
-	for _, d := range systemBinDirs {
-		if strings.HasPrefix(path, d) && !strings.Contains(strings.TrimPrefix(path, d), "/") {
-			underSystemBin = true
-			break
-		}
-	}
-	if !underSystemBin {
-		// e.g. /opt/gitea/bin/gitea, /usr/lib/plexmediaserver/Plex Media Server
+	// 3. the app name appears as a path component or in the basename. This is
+	//    the required POSITIVE tie — there is NO "not in a system bin dir ⇒
+	//    app-owned" fallback, which let shared runtimes like
+	//    /usr/libexec/platform-python and /lib64/ld-linux-*.so.* through
+	//    (review finding). Every entrypoint must earn the label.
+	appName := strings.ToLower(policy.SafeName(p.Name))
+	normName := strings.ReplaceAll(name, "-", "_")
+	if strings.Contains(normName, appName) || strings.Contains(appName, normName) {
 		return true
 	}
-	// 4. directly in a system bin dir: require the basename to encode the app
-	//    name (e.g. /usr/sbin/mosquitto for app "mosquitto").
-	appName := strings.ToLower(policy.SafeName(p.Name))
-	return strings.Contains(strings.ReplaceAll(name, "-", "_"), appName) ||
-		strings.Contains(appName, strings.ReplaceAll(name, "-", "_"))
+	for _, seg := range strings.Split(strings.ToLower(filepath.Dir(path)), "/") {
+		seg = strings.ReplaceAll(seg, "-", "_")
+		if seg != "" && strings.Contains(seg, appName) {
+			return true
+		}
+	}
+	return false
 }
 
 // failEarly mirrors Run's fail closure for use before it is defined.

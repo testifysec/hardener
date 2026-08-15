@@ -59,3 +59,20 @@ func TestBuildBindsEntrypointDigests(t *testing.T) {
 		t.Errorf("entrypoint bytes must be a subject: %+v", st.Subject)
 	}
 }
+
+// A passing verdict must bind to the exercised artifact (RPM or entrypoint
+// bytes), not merely to the generated policy text — otherwise a deploy gate
+// trusts a claim tied to nothing it will actually install (review finding).
+func TestPassingVerdictRequiresArtifactSubject(t *testing.T) {
+	r := passingResult()
+	r.RPMPath = ""
+	r.EntrypointDigests = nil // only .te/.fc would remain
+	if _, err := BuildOrErr(r, Env{}, nil); err == nil {
+		t.Fatal("passing verdict with only policy-text subjects must be rejected")
+	}
+	// With an entrypoint digest it succeeds.
+	r.EntrypointDigests = map[string]string{"/usr/sbin/widgetd": goodSHA}
+	if _, err := BuildOrErr(r, Env{}, nil); err != nil {
+		t.Fatalf("entrypoint-bound passing verdict must be accepted: %v", err)
+	}
+}

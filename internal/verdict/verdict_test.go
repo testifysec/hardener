@@ -24,8 +24,9 @@ func passingResult() *pipeline.Result {
 			Rule:   policy.AllowRule{Source: "widget_t", Target: "widget_t", Class: "capability", Perms: []string{"setuid"}},
 		}},
 		EnforceOK: true, DomainOK: true, ExerciseOK: true, FlagsAccepted: true,
-		StaticChecks: []pipeline.StaticCheck{{Name: "no shadow_t read/write", Passed: true}},
-		RPMPath:      "/home/u/rpmbuild/RPMS/noarch/widget-selinux-1.0.0-1.el9.noarch.rpm",
+		EntrypointDigests: map[string]string{"/usr/sbin/widgetd": "abababababababababababababababababababababababababababababababab"},
+		StaticChecks:      []pipeline.StaticCheck{{Name: "no shadow_t read/write", Passed: true}},
+		RPMPath:           "/home/u/rpmbuild/RPMS/noarch/widget-selinux-1.0.0-1.el9.noarch.rpm",
 	}
 }
 

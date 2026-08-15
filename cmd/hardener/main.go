@@ -33,8 +33,12 @@ import (
 //     is compared for advisory reporting only.
 func checkConformance(res *pipeline.Result, t *target.Target, manifestPath string, updateBaseline bool, logf func(string, ...any)) {
 	res.Party = t.Party
-	if res.FinalProfile == nil || res.FailureReason != "" {
-		return // the run never got far enough to observe behavior
+	// Never persist or compare a baseline for a run that did not fully verify:
+	// an enforcement failure can leave FailureReason empty while EnforceOK is
+	// false, and --update-baseline would otherwise commit an unverified
+	// privilege set (review finding).
+	if res.FinalProfile == nil || res.IsFailure() {
+		return
 	}
 	obs := conformance.ExtractObserved(res.FinalProfile, res.FinalRules)
 
