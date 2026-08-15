@@ -23,6 +23,12 @@ executables:
   - /opt/splunkforwarder/bin/splunk
   - /opt/splunkforwarder/bin/splunkd
 paths:
+  # Writable runtime subtrees FIRST (ordered match wins): the forwarder writes
+  # hot buckets, fishbucket, logs, and pid/socket state under var/, and updates
+  # config under etc/. The rest of /opt/splunkforwarder is read-only program
+  # files (content) — a daemon must not be able to rewrite its own binaries.
+  - { path: "/opt/splunkforwarder/var(/.*)?", kind: var_lib }
+  - { path: "/opt/splunkforwarder/etc(/.*)?", kind: var_lib }
   - { path: "/opt/splunkforwarder(/.*)?", kind: content }
 exercise: |
   # UF 9.x ships with the management port disabled; assert what a forwarder

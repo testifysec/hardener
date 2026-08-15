@@ -61,6 +61,25 @@ type Refinement struct {
 	Entrypoints []EntrypointIssue
 }
 
+// safeForeignTypes is the curated allowlist of distro types a confined daemon
+// routinely reads with no meaningful risk. Everything else foreign goes to
+// review by default — the set of dangerous types is open-ended, so an
+// allowlist is the only fail-closed posture.
+var safeForeignTypes = map[string]bool{
+	"cert_t":            true, // TLS certs and keys under /etc/pki
+	"sysctl_net_t":      true, // /proc/sys/net tunables
+	"sysctl_kernel_t":   true, // read-only kernel tunables
+	"net_conf_t":        true, // /etc/resolv.conf, hosts
+	"hostname_exec_t":   true, // running /usr/bin/hostname
+	"ldconfig_exec_t":   true, // dynamic loader cache refresh
+	"locale_t":          true, // localization data
+	"proc_t":            true, // /proc
+	"proc_net_t":        true, // /proc/net
+	"random_device_t":   true, // /dev/random, urandom
+	"devlog_t":          true, // /dev/log syslog socket
+	"syslogd_var_run_t": true, // syslog runtime socket dir
+}
+
 // safeCapabilities is the ALLOWLIST: capabilities a confined daemon may hold
 // without human review. Everything else is privilege worth a look — a
 // blocklist silently passed audit_control, bpf, perfmon, setpcap, setfcap,
@@ -138,7 +157,16 @@ func Refine(p *profile.Profile, denials []avc.Denial) Refinement {
 			perms = []string{"execute", "execute_no_trans", "getattr", "map", "open", "read"}
 		}
 		rule := AllowRule{Source: dom, Target: d.TargetType, Class: d.Class, Perms: perms}
-		if reason := dangerReason(rule); reason != "" {
+		reason := dangerReason(rule)
+		// Foreign-type access defaults to review. A type that is neither ours,
+		// a port type, nor on the curated safe allowlist is an unknown grant —
+		// it must not fail open the way the finite blocklists did (a read of
+		// ssh_home_t would otherwise just become policy). (review finding)
+		if reason == "" && !own[d.TargetType] && !isCapabilityClass(d.Class) &&
+			!strings.HasSuffix(d.TargetType, "_port_t") && !safeForeignTypes[d.TargetType] {
+			reason = "foreign type access requiring review: " + d.TargetType
+		}
+		if reason != "" {
 			res.Flags = append(res.Flags, Flag{Reason: reason, Rule: rule})
 		}
 		res.AllowRules = append(res.AllowRules, rule)
