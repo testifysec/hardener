@@ -112,7 +112,9 @@ func main() {
 		os.Exit(2)
 	}
 	fs := flag.NewFlagSet("run", flag.ExitOnError)
-	vmName := fs.String("vm", "selinux-verifier", "Lima instance name")
+	vmName := fs.String("vm", "selinux-verifier", "Lima instance name (local verifier)")
+	sshTarget := fs.String("ssh", "", "remote verifier over ssh, user@host (RHEL-family, Enforcing, passwordless sudo); overrides --vm")
+	sshKey := fs.String("ssh-key", "", "identity file for --ssh")
 	outDir := fs.String("out", "reports", "report output directory")
 	rounds := fs.Int("rounds", 5, "max permissive observation rounds")
 	acceptFlagged := fs.Bool("accept-flagged", false, "auto-apply flagged rules (still reported)")
@@ -127,7 +129,10 @@ func main() {
 		log.Fatal(err)
 	}
 
-	runner := &vm.Lima{Instance: *vmName}
+	var runner vm.Runner = &vm.Lima{Instance: *vmName}
+	if *sshTarget != "" {
+		runner = &vm.SSH{Target: *sshTarget, KeyPath: *sshKey}
+	}
 	failures := 0
 	for _, path := range fs.Args() {
 		t, err := target.Load(path)
