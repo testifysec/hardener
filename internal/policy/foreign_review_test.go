@@ -5,6 +5,7 @@ import (
 	"testing"
 
 	"github.com/testifysec/hardener/internal/avc"
+	"github.com/testifysec/hardener/internal/profile"
 )
 
 // Foreign-type access defaults to review: a type that is neither ours nor on
@@ -188,6 +189,13 @@ func TestCertTReadIsFlagged(t *testing.T) {
 // is a W^X violation and must go to review, not auto-apply.
 func TestExecuteFromWritableOwnedTypeFlagged(t *testing.T) {
 	p := widgetProfile()
+	// These writable types are OWNED only when the profile declares the matching
+	// path kinds; widgetProfile lacks tmp/cache, so add them to keep the scenario
+	// consistent with the corrected ownTypes (owns exactly what GenerateTE emits).
+	p.Paths = append(p.Paths,
+		profile.PathAccess{Path: "/var/tmp/widget(/.*)?", Kind: "tmp"},
+		profile.PathAccess{Path: "/var/cache/widget(/.*)?", Kind: "cache"},
+	)
 	for _, wt := range []string{"widget_var_lib_t", "widget_log_t", "widget_tmp_t", "widget_cache_t", "widget_runtime_t"} {
 		ds := []avc.Denial{{
 			SourceType: "widget_t", TargetType: wt, Class: "file",

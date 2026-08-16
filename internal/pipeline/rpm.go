@@ -290,6 +290,19 @@ if [ "$_op" = 1 ]; then
         echo "ERROR: a SELinux module named %[1]s already exists, but this is a fresh install; refusing to shadow a foreign module. Remove it first or build with a distinct name." >&2
         exit 1
     fi
+    # A DIFFERENTLY-NAMED foreign module can already own our PORT type (%[7]s)
+    # even when no same-name module exists — the module-name check above misses
+    # it, unlike the verifier's all-generated-types conflict check. On a fresh
+    # install we have never created %[7]s, so any existing mapping under it is
+    # foreign; the reconciliation below would DELETE that mapping (mistaking it
+    # for our own stale one) BEFORE semodule -i fails on the duplicate type,
+    # corrupting unrelated policy. Refuse first. semanage (not seinfo) keeps this
+    # portable to a minimal host that lacks setools (review finding).
+    _pt="$(semanage port -l 2>/dev/null)" || { echo "ERROR: 'semanage port -l' failed on fresh install; cannot confirm %[7]s is unclaimed — refusing" >&2; exit 1; }
+    if printf '%%s\n' "$_pt" | awk -v t=%[7]s '$1==t{f=1} END{exit !f}'; then
+        echo "ERROR: SELinux port type %[7]s already has mappings but this is a fresh install; a foreign module owns it — refusing to disturb it. Build with a distinct name." >&2
+        exit 1
+    fi
 else
     # Upgrade: snapshot the currently-installed module before replacing it. If the
     # snapshot cannot be taken we ABORT before mutating anything — proceeding would

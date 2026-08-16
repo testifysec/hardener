@@ -2,6 +2,7 @@
 package avc
 
 import (
+	"encoding/hex"
 	"errors"
 	"path"
 	"regexp"
@@ -9,6 +10,34 @@ import (
 	"strconv"
 	"strings"
 )
+
+// decodeAuditField returns the literal string value of an audit field. The
+// kernel HEX-encodes any value containing a space, quote, or control character
+// as an unquoted, even-length, all-hex run (a path with a space in it, for
+// example); a normal value is either double-quoted or an unquoted token that
+// contains non-hex characters like '/'. Treating a hex run as a literal path
+// (and then prepending a CWD) misclassifies an owned mislabeled file and
+// over-grants a type-wide allow rule instead of a relabel (review finding).
+func decodeAuditField(raw string) string {
+	if strings.HasPrefix(raw, `"`) {
+		return strings.Trim(raw, `"`) // quoted → already literal, never hex
+	}
+	if len(raw) >= 2 && len(raw)%2 == 0 && isHexRun(raw) {
+		if b, err := hex.DecodeString(raw); err == nil {
+			return string(b)
+		}
+	}
+	return raw
+}
+
+func isHexRun(s string) bool {
+	for _, c := range s {
+		if !((c >= '0' && c <= '9') || (c >= 'a' && c <= 'f') || (c >= 'A' && c <= 'F')) {
+			return false
+		}
+	}
+	return true
+}
 
 // Denial is one parsed AVC record.
 type Denial struct {
@@ -62,7 +91,7 @@ func ParseLogWithPaths(log string) []Denial {
 		if strings.Contains(line, "type=CWD") && ev != "" {
 			for _, f := range fieldRe.FindAllStringSubmatch(line, -1) {
 				if f[1] == "cwd" {
-					cwdByEvent[ev] = strings.Trim(f[2], `"`)
+					cwdByEvent[ev] = decodeAuditField(f[2])
 				}
 			}
 			continue
@@ -72,7 +101,7 @@ func ParseLogWithPaths(log string) []Denial {
 			for _, f := range fieldRe.FindAllStringSubmatch(line, -1) {
 				switch f[1] {
 				case "name":
-					name = strings.Trim(f[2], `"`)
+					name = decodeAuditField(f[2])
 				case "inode":
 					inode = strings.Trim(f[2], `"`)
 				}
@@ -142,9 +171,9 @@ func ParseLine(line string) (*Denial, error) {
 		case "comm":
 			d.Comm = val
 		case "name":
-			d.Name = val
+			d.Name = decodeAuditField(f[2])
 		case "path":
-			d.Path = val
+			d.Path = decodeAuditField(f[2])
 		case "scontext":
 			d.SourceType = contextType(val)
 		case "tcontext":

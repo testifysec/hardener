@@ -17,16 +17,27 @@ func IsOwnType(p *profile.Profile, t string) bool {
 // ownTypes returns every type the module itself declares for this profile.
 func ownTypes(p *profile.Profile) map[string]bool {
 	app := SafeName(p.Name)
+	// Own EXACTLY the types GenerateTE actually declares — no more. dom and
+	// <app>_exec_t are always emitted; a kind type only when the profile has a
+	// path of that kind; the port type only when the profile declares ports.
+	// Marking a type owned that the module never declares let an externally
+	// defined same-name type (a foreign widget_port_t when we declare no ports)
+	// bypass foreign-type review while RenderRefinedSection omitted its required
+	// declaration (review finding).
 	own := map[string]bool{
 		DomainType(p.Name): true,
 		app + "_exec_t":    true,
-		PortType(p.Name):   true,
+	}
+	if len(p.Ports) > 0 {
+		own[PortType(p.Name)] = true
 	}
 	// KindUnit is intentionally excluded: unit files take the shared base type
 	// systemd_unit_file_t (see TypeForKind), which the module does not declare
 	// and does not own.
-	for _, k := range []Kind{KindConf, KindVarLib, KindLog, KindRuntime, KindContent, KindTmp, KindCache} {
-		own[TypeForKind(p.Name, k)] = true
+	for _, pa := range p.Paths {
+		if k := KindFromString(pa.Kind); k != KindUnit {
+			own[TypeForKind(p.Name, k)] = true
+		}
 	}
 	return own
 }

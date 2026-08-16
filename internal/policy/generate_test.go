@@ -18,6 +18,7 @@ func widgetProfile() *profile.Profile {
 			{Path: "/var/lib/widget(/.*)?", Kind: "var_lib"},
 			{Path: "/var/log/widget(/.*)?", Kind: "log"},
 			{Path: "/run/widget(/.*)?", Kind: "runtime"},
+			{Path: "/opt/widget/data(/.*)?", Kind: "content"},
 		},
 		Ports: []profile.Port{{Proto: "tcp", Port: 8443}},
 	}
