@@ -20,8 +20,8 @@ func TestAuditRotationDuringReadFailsClosed(t *testing.T) {
 }
 
 // Round 19 (#4): the %post rollback must only run on a FRESH install. On an
-// upgrade it must NOT tear down the module/ports — that would destroy the prior
-// working installation and leave the service unconfined.
+// upgrade it must restore the PRIOR module (round 22), never destroy the working
+// installation or leave the service unconfined.
 func TestSpecRollbackIsUpgradeSafe(t *testing.T) {
 	p := &profile.Profile{
 		Name:        "widget",
@@ -29,7 +29,11 @@ func TestSpecRollbackIsUpgradeSafe(t *testing.T) {
 		Ports:       []profile.Port{{Proto: "tcp", Port: 8443}},
 	}
 	spec := GenerateSpec(p, "1")
-	if !strings.Contains(spec, "_op=$1") || !strings.Contains(spec, `[ "$_op" = 1 ] || return 0`) {
-		t.Errorf("rollback must only run on a fresh install (upgrade-safe):\n%s", spec)
+	// Fresh-install removes the module; upgrade snapshots and restores it.
+	if !strings.Contains(spec, `if [ "$_op" = 1 ]; then`) {
+		t.Errorf("rollback must branch fresh-install vs upgrade:\n%s", spec)
+	}
+	if !strings.Contains(spec, "semodule -E %[1]s") && !strings.Contains(spec, "semodule -E widget") {
+		t.Errorf("upgrade must snapshot the previous module for restore:\n%s", spec)
 	}
 }

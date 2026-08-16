@@ -90,3 +90,28 @@ func TestLoadAcceptsKnownKinds(t *testing.T) {
 		}
 	}
 }
+
+const broadPathManifest = `name: widget
+install: "true"
+unit: widget.service
+exercise: "true"
+executables:
+  - /opt/widget/bin/widgetd
+paths:
+  - { path: "%s", kind: content }
+`
+
+// Round 22: a manifest must not claim a broad system tree — %post restorecon -RF
+// on it would relabel large parts of the customer filesystem.
+func TestLoadRejectsBroadPaths(t *testing.T) {
+	for _, bad := range []string{"/usr(/.*)?", "/(/.*)?", "/etc(/.*)?", "/var/lib(/.*)?", "/usr/bin(/.*)?", "/opt(/.*)?"} {
+		if _, err := Load(write(t, fmt.Sprintf(broadPathManifest, bad))); err == nil {
+			t.Errorf("broad path %q must be rejected", bad)
+		}
+	}
+	for _, ok := range []string{"/etc/widget(/.*)?", "/var/lib/widget(/.*)?", "/opt/widget(/.*)?", "/usr/lib/widgetsrv(/.*)?"} {
+		if _, err := Load(write(t, fmt.Sprintf(broadPathManifest, ok))); err != nil {
+			t.Errorf("bounded path %q must load: %v", ok, err)
+		}
+	}
+}

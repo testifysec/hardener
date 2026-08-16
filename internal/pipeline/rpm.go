@@ -140,31 +140,39 @@ install -D -m 0644 %%{SOURCE0} %%{buildroot}%%{_datadir}/selinux/packages/%[1]s.
 install -D -m 0644 %%{SOURCE1} %%{buildroot}%%{_datadir}/selinux/hardener/%[1]s.fc
 
 %%post
-# Fail closed WITH rollback: loading the module then failing entrypoint/port
-# validation must not leave the module and partial port mappings installed after
-# a reported install failure (review finding). The rollback runs ONLY on a FRESH
-# install ($1 == 1), where "undo everything" correctly restores the pre-install
-# state (nothing). On an UPGRADE ($1 >= 2) it does NOT remove the module or the
-# ports: semodule -i already replaced the prior module, and tearing it down would
-# leave the service with NO policy — worse than the flagged issue. The failure is
-# still reported via the non-zero exit (review finding).
+# Fail closed WITH transactional rollback. Loading the module then failing
+# entrypoint/port validation must not leave a partial, unverified policy active
+# (review finding). Fresh install ($1 == 1): undo everything (restore the empty
+# pre-install state). Upgrade ($1 >= 2): restore the PREVIOUS module and its
+# labels rather than either keeping the rejected new module or leaving the
+# service with none — a snapshot taken before replacement makes that possible.
 _op=$1
 _ok=0
 _added=""
+# Snapshot the currently-installed module before replacing it (upgrade only).
+# Best-effort: if extraction is unavailable, _snap stays empty and we keep the
+# loaded module rather than leaving the service unconfined.
+_snap=""
+if [ "$_op" != 1 ]; then
+    _snap="$(mktemp -d 2>/dev/null || true)"
+    if [ -n "$_snap" ] && ( cd "$_snap" && semodule -E %[1]s ) 2>/dev/null; then :; else _snap=""; fi
+fi
 _rollback() {
     [ "$_ok" = 1 ] && return 0
     # Remove ONLY the port mappings THIS transaction added (tracked in _added),
     # never a pre-existing mapping owned by another service (review finding).
     for _row in $_added; do _rp=${_row%%%%:*}; _rn=${_row##*:}; semanage port -d -t %[7]s -p "$_rp" "$_rn" 2>/dev/null || :; done
-    # The module is only torn down on a FRESH install ($1 == 1); an upgrade keeps
-    # the loaded module rather than leaving the service with none.
-    [ "$_op" = 1 ] || return 0
-    semodule -r %[1]s 2>/dev/null || :
-    # After removing the module, RESTORE base file labels — the entrypoints and
-    # data were already relabeled to <app>_* types that are now undefined, so
-    # leaving them labeled would make them inaccessible (review finding). Same
-    # restoration the uninstall path performs.
+    if [ "$_op" = 1 ]; then
+        # Fresh install: remove the module, then restore base file labels.
+        semodule -r %[1]s 2>/dev/null || :
 %[6]s
+    elif [ -n "$_snap" ]; then
+        # Upgrade failure: reinstall the previous module and re-apply its labels,
+        # so the prior working policy is back in place (review finding).
+        ( cd "$_snap" && { semodule -i %[1]s.cil || semodule -i %[1]s.pp; } ) 2>/dev/null || :
+%[6]s
+    fi
+    # (Upgrade with no snapshot: keep the loaded module — never leave none.)
 }
 trap _rollback EXIT
 if ! semodule -i %%{_datadir}/selinux/packages/%[1]s.pp; then

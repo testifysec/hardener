@@ -134,6 +134,20 @@ func main() {
 		log.Fatal(err)
 	}
 
+	// Reject inputs whose OUTPUT basename collides before running anything. The
+	// report, verdict, and signed envelope are all named from
+	// filepath.Base(path), so two manifests at different paths (team-a/app.yaml
+	// and team-b/app.yaml) would silently overwrite each other's outputs
+	// (review finding).
+	seenOut := map[string]string{}
+	for _, path := range fs.Args() {
+		base := strings.TrimSuffix(filepath.Base(path), ".yaml")
+		if prev, ok := seenOut[base]; ok {
+			log.Fatalf("output-name collision: %q and %q both write outputs named %q — rename one so their outputs do not overwrite each other", prev, path, base)
+		}
+		seenOut[base] = path
+	}
+
 	var runner vm.Runner = &vm.Lima{Instance: *vmName}
 	if *sshTarget != "" {
 		runner = &vm.SSH{Target: *sshTarget, KeyPath: *sshKey}

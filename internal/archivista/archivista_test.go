@@ -57,3 +57,20 @@ func TestUploadUnreachable(t *testing.T) {
 		t.Error("unreachable server must error")
 	}
 }
+
+// Round 22: a 200 with an empty/missing gitoid is NOT a successful store — the
+// upload must return an error, not falsely report the evidence as retrievable.
+func TestUploadRejectsEmptyGitoid(t *testing.T) {
+	for _, body := range []string{`{"gitoid": ""}`, `{}`, `{"gitoid": "   "}`} {
+		srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+			w.WriteHeader(200)
+			_, _ = w.Write([]byte(body))
+		}))
+		env := &signing.Envelope{Payload: "eA==", PayloadType: "t", Signatures: []signing.Signature{{KeyID: "k", Sig: "cw=="}}}
+		_, err := Upload(srv.URL, env)
+		srv.Close()
+		if err == nil {
+			t.Errorf("a 200 with body %q (no gitoid) must be an error", body)
+		}
+	}
+}

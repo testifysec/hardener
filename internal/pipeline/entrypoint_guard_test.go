@@ -112,3 +112,22 @@ func TestPrefixTieIsBoundaryAware(t *testing.T) {
 		t.Error("emby-server must tie to app emby via separator")
 	}
 }
+
+// Round 22: a declared path in a SHARED system bin dir must NOT be app-owned by
+// declaration alone — that would relabel a shared binary (/usr/bin/curl) into
+// the app domain. Ownership there must come from an app-name tie.
+func TestDeclaredSharedBinNotOwned(t *testing.T) {
+	for _, bad := range []string{"/usr/bin/curl", "/bin/tar", "/usr/sbin/nginx", "/usr/local/bin/helper"} {
+		if isAppOwnedExecutable(prof("myapp", []string{bad}), bad) {
+			t.Errorf("declaring %s must not make it app-owned (shared bin dir)", bad)
+		}
+	}
+	// An app-NAMED binary in a shared bin dir stays owned via the name tie.
+	if !isAppOwnedExecutable(prof("nats-server", nil), "/usr/bin/nats-server") {
+		t.Error("app-named binary in /usr/bin must remain owned via the name tie")
+	}
+	// A declared VENDOR-dir path is still owned by declaration.
+	if !isAppOwnedExecutable(prof("plex", []string{"/usr/lib/plexmediaserver/Plex Media Server"}), "/usr/lib/plexmediaserver/Plex Media Server") {
+		t.Error("declared vendor-dir binary must remain owned")
+	}
+}
