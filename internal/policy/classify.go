@@ -76,7 +76,12 @@ func ClassifyPath(path string, exec bool) Kind {
 		return KindUnit
 	case exec:
 		return KindExec
-	case strings.HasPrefix(path, "/etc/"), path == "/etc", isEtcDir(path):
+	// The two cases below cover the whole legitimate /etc space: a file or subtree
+	// under /etc, and /etc itself. A former isEtcDir helper also matched any
+	// top-level path merely PREFIXED with "etc" — /etcd, /etcetera — classifying an
+	// unrelated tree as KindConf and synthesizing the wrong SELinux type for it. It
+	// added nothing but false matches, so it is gone (review finding — round 70).
+	case strings.HasPrefix(path, "/etc/"), path == "/etc":
 		return KindConf
 	case strings.HasPrefix(path, "/var/lib/"):
 		return KindVarLib
@@ -91,10 +96,6 @@ func ClassifyPath(path string, exec bool) Kind {
 	default:
 		return KindContent
 	}
-}
-
-func isEtcDir(path string) bool {
-	return strings.HasPrefix(path, "/etc") && !strings.Contains(strings.TrimPrefix(path, "/etc"), "/")
 }
 
 // TypeForKind returns the SELinux type name for an app's path kind.
