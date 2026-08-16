@@ -77,34 +77,32 @@ func isBroadSystemRoot(root string) bool {
 	return root == "" || broadSystemRoots[root]
 }
 
-// pathTiesToApp reports whether some component of root shares a meaningful
-// prefix with the app name — the positive-ownership signal for a path claim.
+// pathTiesToApp reports whether some component of root matches the app name at
+// a TOKEN BOUNDARY — the positive-ownership signal for a path claim. A bare
+// shared prefix is deliberately NOT enough: it let a short app name claim an
+// unrelated tree (app "dock" → /var/lib/docker, app "a" → /etc/alternatives)
+// because "docker" merely starts with "dock" (review finding). A component ties
+// only when it equals the app name, or one is the other plus an underscore-
+// delimited token (emby ↔ emby_server, nats_server ↔ nats). Vendor dirs whose
+// name shares only a non-boundary prefix (plex ↔ plexmediaserver) cannot be
+// confirmed syntactically and must carry an explicit `owned: true`.
 func pathTiesToApp(root, appName string) bool {
 	app := normPath(policy.SafeName(appName))
-	need := 4
-	if len(app) < need {
-		need = len(app)
-	}
-	if need == 0 {
+	if app == "" {
 		return false
 	}
 	for _, seg := range strings.Split(root, "/") {
+		seg = normPath(seg)
 		if seg == "" {
 			continue
 		}
-		if commonPrefixLen(normPath(seg), app) >= need {
+		if seg == app ||
+			strings.HasPrefix(seg, app+"_") ||
+			strings.HasPrefix(app, seg+"_") {
 			return true
 		}
 	}
 	return false
-}
-
-func commonPrefixLen(a, b string) int {
-	n := 0
-	for n < len(a) && n < len(b) && a[n] == b[n] {
-		n++
-	}
-	return n
 }
 
 // normPath lowercases and maps separators to underscores so path components
@@ -188,8 +186,8 @@ func Load(path string) (*Target, error) {
 		// component shares a meaningful prefix with the app name — loose enough
 		// for vendor dirs (splunkforwarder for splunk-uf, plexmediaserver for
 		// plex) yet rejecting unrelated system paths.
-		if !pathTiesToApp(root, t.Name) {
-			return nil, fmt.Errorf("%s: paths[%d] (%s): no path component ties to app %q — hardener will not relabel an unrelated system path; declare an app-owned location", path, i, pa.Path, t.Name)
+		if !pathTiesToApp(root, t.Name) && !pa.Owned {
+			return nil, fmt.Errorf("%s: paths[%d] (%s): no path component ties to app %q at a token boundary — hardener will not relabel an unrelated system path. If this really is an app-owned vendor directory (e.g. plexmediaserver for plex), set `owned: true` on this path to vouch for it explicitly", path, i, pa.Path, t.Name)
 		}
 	}
 	// Port proto/number are interpolated into root %post/%postun `semanage port`

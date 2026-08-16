@@ -155,9 +155,14 @@ cat > %%{buildroot}%%{_datadir}/selinux/hardener/%[1]s.roots <<'HARDENER_ROOTS'
 %%pre
 # On upgrade, stash the OLD roots list BEFORE the new payload overwrites it, so
 # %%post can restore base labels on roots the new profile no longer claims
-# (review finding).
+# (review finding). The stash lives in the package-owned, root-only directory
+# /usr/share/selinux/hardener — NOT /tmp: a predictable /tmp path let a local
+# user pre-plant a symlink and redirect the root-run cp/restorecon to an
+# arbitrary file (review finding). rm any stale copy first so we never follow
+# one left by a previously-failed upgrade.
 if [ "$1" -ge 2 ] && [ -f %%{_datadir}/selinux/hardener/%[1]s.roots ]; then
-    cp %%{_datadir}/selinux/hardener/%[1]s.roots /tmp/hardener-%[1]s.oldroots 2>/dev/null || :
+    rm -f %%{_datadir}/selinux/hardener/%[1]s.oldroots
+    cp %%{_datadir}/selinux/hardener/%[1]s.roots %%{_datadir}/selinux/hardener/%[1]s.oldroots 2>/dev/null || :
 fi
 
 %%post
@@ -210,20 +215,25 @@ trap _rollback EXIT
     echo "ERROR: semodule failed to load the %[1]s policy module; the application is NOT confined" >&2
     exit 1
 fi
-%[2]s%[3]s_ok=1
-
-# Reconcile REMOVED file-context roots: any root the previous install labeled
-# that the new profile no longer claims is restored to its base label — else the
-# files keep a now-undeclared app type or a dangling one (review finding). Runs
-# only after a successful load/label.
-if [ -f /tmp/hardener-%[1]s.oldroots ]; then
+%[2]s%[3]s
+# Reconcile REMOVED file-context roots BEFORE declaring success: any root the
+# previous install labeled that the new profile no longer claims is restored to
+# its base label — else the files keep a now-undeclared app type or a dangling
+# one. A restore FAILURE fails the whole transaction so the trap rolls back;
+# previously this ran AFTER _ok=1 and only warned, so an upgrade could "succeed"
+# with obsolete labels and privileges still present (review finding). Consulted
+# only on upgrade, from the root-only stash. The redirect (not a pipe) keeps the
+# loop in this shell so a failed restore aborts the scriptlet and triggers rollback.
+if [ "$_op" != 1 ] && [ -f %%{_datadir}/selinux/hardener/%[1]s.oldroots ]; then
     _newroots="$(cat %%{_datadir}/selinux/hardener/%[1]s.roots 2>/dev/null)"
     while IFS= read -r _oldroot; do
         [ -n "$_oldroot" ] || continue
-        printf '%%s\n' "$_newroots" | grep -qxF "$_oldroot" || restorecon -RF -- "$_oldroot" 2>/dev/null || echo "warning: could not restore removed root $_oldroot" >&2
-    done < /tmp/hardener-%[1]s.oldroots
-    rm -f /tmp/hardener-%[1]s.oldroots
+        printf '%%s\n' "$_newroots" | grep -qxF "$_oldroot" && continue
+        restorecon -RF -- "$_oldroot" || { echo "ERROR: could not restore removed root $_oldroot; rolling back the upgrade" >&2; exit 1; }
+    done < %%{_datadir}/selinux/hardener/%[1]s.oldroots
 fi
+_ok=1
+rm -f %%{_datadir}/selinux/hardener/%[1]s.oldroots
 
 %%postun
 if [ $1 -eq 0 ]; then

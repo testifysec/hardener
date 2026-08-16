@@ -27,9 +27,12 @@ paths:
   # hot buckets, fishbucket, logs, and pid/socket state under var/, and updates
   # config under etc/. The rest of /opt/splunkforwarder is read-only program
   # files (content) — a daemon must not be able to rewrite its own binaries.
-  - { path: "/opt/splunkforwarder/var(/.*)?", kind: var_lib }
-  - { path: "/opt/splunkforwarder/etc(/.*)?", kind: var_lib }
-  - { path: "/opt/splunkforwarder(/.*)?", kind: content }
+  # splunkforwarder is the vendor directory for the Splunk Universal Forwarder
+  # (app name "splunkuf"); the name shares only a non-boundary prefix, so
+  # ownership is asserted explicitly.
+  - { path: "/opt/splunkforwarder/var(/.*)?", kind: var_lib, owned: true }
+  - { path: "/opt/splunkforwarder/etc(/.*)?", kind: var_lib, owned: true }
+  - { path: "/opt/splunkforwarder(/.*)?", kind: content, owned: true }
 exercise: |
   # UF 9.x ships with the management port disabled; assert what a forwarder
   # actually does: splunkd runs, stays up, and writes its own logs.
