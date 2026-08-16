@@ -1289,27 +1289,51 @@ func exercise(r vm.Runner, t *target.Target, dom string) ([]avc.Denial, bool, ru
 		return nil, exOK, run, fmt.Errorf("auditd backlog did not drain (or could not be confirmed) after the exercise — audit records may still be unwritten; re-run on a less loaded verifier")
 	}
 	// WRITE BARRIER. backlog==0 only means the kernel handed records to auditd —
-	// NOT that auditd finished APPENDING them to audit.log, so an immediate tail
-	// can still miss a pending AVC (review finding). The unit is stopped, so no new
-	// records are generated; wait (bounded) until the log SIZE stops growing across
-	// two consecutive stats, meaning auditd's writes have settled. Require two equal
-	// reads; fail closed if it never stabilizes.
-	sizeStable := false
-	prevSize := ""
-	for i := 0; i < 8; i++ {
-		s, err := r.Run("sudo stat -c '%s' /var/log/audit/audit.log")
-		if err != nil {
-			continue
+	// NOT that auditd finished APPENDING them to audit.log. The PRIMARY barrier is
+	// an ORDERED SENTINEL: emit a unique USER record NOW (the unit is already
+	// stopped, so this record is ordered AFTER every AVC the unit produced), then
+	// wait until it lands in the log. Once the sentinel is written, auditd has
+	// necessarily flushed everything queued before it, so no late AVC can slip in
+	// after our read — which a size-stabilization heuristic cannot guarantee
+	// (auditd can dequeue an AVC and append it just after the size settles)
+	// (review finding). The sentinel text embeds the exercise's start inode+offset
+	// so it is unique per run.
+	barrierOK := false
+	sentinel := fmt.Sprintf("hardener-barrier-%s-%s", startInode, strings.TrimSpace(offset))
+	if _, err := r.Run("sudo auditctl -m " + vm.ShellQuote(sentinel)); err == nil {
+		for i := 0; i < 10; i++ {
+			n, gerr := r.Run("sudo grep -Fc " + vm.ShellQuote(sentinel) + " /var/log/audit/audit.log 2>/dev/null || true")
+			if gerr != nil {
+				continue
+			}
+			if s := strings.TrimSpace(n); s != "" && s != "0" {
+				barrierOK = true
+				break
+			}
 		}
-		s = strings.TrimSpace(s)
-		if s != "" && s == prevSize {
-			sizeStable = true
-			break
-		}
-		prevSize = s
 	}
-	if !sizeStable {
-		return nil, exOK, run, fmt.Errorf("audit log size did not stabilize after the exercise — auditd is still writing; re-run on a less loaded verifier")
+	// FALLBACK — only if the sentinel mechanism is unavailable (older auditctl, a
+	// user-message filter): wait (bounded) until the log SIZE stops growing across
+	// two consecutive stats. Weaker than the sentinel but never worse than the
+	// prior behavior; fail closed if neither barrier can be established.
+	if !barrierOK {
+		sizeStable := false
+		prevSize := ""
+		for i := 0; i < 8; i++ {
+			s, err := r.Run("sudo stat -c '%s' /var/log/audit/audit.log")
+			if err != nil {
+				continue
+			}
+			s = strings.TrimSpace(s)
+			if s != "" && s == prevSize {
+				sizeStable = true
+				break
+			}
+			prevSize = s
+		}
+		if !sizeStable {
+			return nil, exOK, run, fmt.Errorf("audit write barrier could not be established after the exercise: no sentinel, and the log size did not stabilize — auditd is still writing; re-run on a less loaded verifier")
+		}
 	}
 	// Fail closed on log rotation/truncation: a new inode or a shrunk file
 	// means our byte offset is stale and a plain tail would silently miss AVC

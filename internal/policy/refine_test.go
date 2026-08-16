@@ -239,3 +239,36 @@ func TestFlagWriteExecRulesIgnoresReadExecAndForeign(t *testing.T) {
 		t.Errorf("foreign type is not owned; this scanner must ignore it, got %+v", f)
 	}
 }
+
+// Powerful kernel object classes (bpf, perf_event, io_uring) must go to review
+// even when the target is the app's OWN type — the foreign-type gate never sees
+// an owned self-target, and dangerReason otherwise ignores the object class, so
+// these auto-applied unreviewed. (review finding — round 56)
+func TestDangerousObjectClassesFlaggedEvenWhenOwned(t *testing.T) {
+	p := widgetProfile()
+	for _, tc := range []struct{ class, perm string }{
+		{"bpf", "prog_load"},
+		{"perf_event", "open"},
+		{"io_uring", "sqpoll"},
+	} {
+		ds := []avc.Denial{{
+			SourceType: "widget_t", TargetType: "widget_t", Class: tc.class, Perms: []string{tc.perm},
+		}}
+		res := Refine(p, ds)
+		flagged := false
+		for _, f := range res.Flags {
+			if strings.Contains(f.Reason, "privileged object class") && strings.Contains(f.Reason, tc.class) {
+				flagged = true
+			}
+		}
+		if !flagged {
+			t.Errorf("%s:%s on an owned self-target must be flagged for review, got %+v", tc.class, tc.perm, res.Flags)
+		}
+		// Flagged rules must NOT silently ship in the auto-apply set.
+		for _, r := range res.AllowRules {
+			if r.Class == tc.class {
+				t.Errorf("%s rule must be dropped from auto-apply until reviewed, got %+v", tc.class, r)
+			}
+		}
+	}
+}
