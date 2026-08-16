@@ -321,3 +321,39 @@ func TestRunFailsClosedWhenDeclaredPortNotAssigned(t *testing.T) {
 		t.Errorf("an unassigned declared port must fail closed, got %q", res.FailureReason)
 	}
 }
+
+// Round 35: same-inode truncation between the pre-tail stat and the read makes
+// tail return empty successfully; the size recheck must catch it.
+func TestExerciseFailsClosedOnSameInodeTruncation(t *testing.T) {
+	tgt := &target.Target{
+		Name: "widget", Unit: "widget.service", Install: "true",
+		Exercise: "true", Executables: []string{"/opt/widget/bin/widgetd"},
+	}
+	f := &fakeRunner{responses: map[string]string{
+		"stat -c '%s %i'":           "100 4242", // pre/post size 100, inode 4242
+		"stat -c '%i'":              "4242",     // inode unchanged post-read
+		"stat -c '%s'":              "10",       // size shrank 100 -> 10 (truncated)
+		"auditctl -s":               "enabled 1 lost 0 backlog 0",
+		"is-active widget.service":  "inactive",
+		"systemctl show -p MainPID": "LABEL:system_u:system_r:widget_t:s0\nEXE:/opt/widget/bin/widgetd\nEXESHA:" + strings.Repeat("ab", 32),
+	}}
+	if _, _, _, err := exercise(f, tgt, "widget_t"); err == nil || !strings.Contains(err.Error(), "truncated during read") {
+		t.Fatalf("same-inode truncation must fail closed, got %v", err)
+	}
+}
+
+// Round 35: a failure after the module is installed must roll back the verifier's
+// generated SELinux state (semodule -r) rather than leaving it to contaminate
+// later runs.
+func TestRunCleansVerifierStateOnFailure(t *testing.T) {
+	f := passingRunner()
+	// Force a failure AFTER install: no shadow_t static check trips at enforcement.
+	f.responses["-t shadow_t"] = "allow widget_t shadow_t:file read;"
+	res := Run(f, testTarget(), Options{MaxRounds: 2})
+	if res.FailureReason == "" {
+		t.Fatal("expected a failure")
+	}
+	if f.countCalls("semodule -r widget") == 0 {
+		t.Error("a post-install failure must roll back the generated module (semodule -r)")
+	}
+}

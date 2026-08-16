@@ -124,9 +124,32 @@ func Run(r vm.Runner, t *target.Target, opts Options) *Result {
 		}
 	}
 
+	// Once a module is loaded, a failure must ROLL BACK all generated SELinux
+	// state — the module, the ports we assigned, and the labels — so the
+	// persistent verifier is not left contaminated (which would fail the
+	// name-conflict check and taint later runs) (review finding). Best-effort and
+	// idempotent; runs on every unsuccessful return via fail().
+	moduleInstalled := false
+	cleanupVerifierState := func() {
+		if !moduleInstalled {
+			return
+		}
+		appName := policy.SafeName(p.Name)
+		_, _ = r.Run(fmt.Sprintf("sudo semodule -r %s 2>/dev/null || true", appName))
+		pt := policy.PortType(p.Name)
+		for _, port := range p.Ports {
+			_, _ = r.Run(fmt.Sprintf("sudo semanage port -d -t %s -p %s %d 2>/dev/null || true", pt, port.Proto, port.Port))
+		}
+		for _, root := range RelabelRoots(p) {
+			q := vm.ShellQuote(root)
+			_, _ = r.Run(fmt.Sprintf("if [ -e %s ]; then sudo restorecon -RF -- %s 2>/dev/null || true; fi", q, q))
+		}
+	}
+
 	fail := func(stage string, err error) *Result {
 		res.FailureReason = fmt.Sprintf("%s: %v", stage, err)
 		opts.Log("FAIL %s: %v", stage, err)
+		cleanupVerifierState()
 		return res
 	}
 
@@ -414,6 +437,7 @@ func Run(r vm.Runner, t *target.Target, opts Options) *Result {
 		if err := installPolicy(r, p, te, fc); err != nil {
 			return fail(fmt.Sprintf("policy-install round %d", round), err)
 		}
+		moduleInstalled = true
 		res.FinalTE, res.FinalFC = te, fc
 
 		opts.Log("[%s] observe round %d (permissive domain)", t.Name, round)
@@ -492,6 +516,7 @@ func Run(r vm.Runner, t *target.Target, opts Options) *Result {
 	if err := installPolicy(r, p, finalTE, finalFC); err != nil {
 		return fail("final-policy-install", err)
 	}
+	moduleInstalled = true
 	res.FinalTE, res.FinalFC = finalTE, finalFC
 
 	// The verifier itself must still be trustworthy after running the
@@ -582,6 +607,7 @@ func Run(r vm.Runner, t *target.Target, opts Options) *Result {
 		if err := installPolicy(r, p, te, fc); err != nil {
 			return fail("policy-install (enforce refinement)", err)
 		}
+		moduleInstalled = true
 		res.FinalTE, res.FinalFC = te, fc
 	}
 
@@ -797,15 +823,34 @@ sudo semodule -i %s.pp
 	if _, err := r.Run(script); err != nil {
 		return err
 	}
-	// Relabel declared roots and FAIL CLOSED when a root that EXISTS cannot be
-	// labeled. Appending `|| true` made the error unobservable, so the verifier
-	// could sign a profile whose roots were never relabeled while the generated
-	// RPM later rejects the same state (review finding). A root the app creates on
-	// first run may not exist yet — skip it, don't fail.
-	for _, root := range RelabelRoots(p) {
+	// Relabel each declared path root and VERIFY the resulting type. FAIL CLOSED
+	// when a root that EXISTS cannot be labeled, or ends up with a type OTHER than
+	// the one its kind maps to: a higher-priority file_contexts.local rule can
+	// apply a broader type while restorecon still "succeeds", leaving an
+	// unexercised path mislabeled under a passing verdict (review finding).
+	// Appending `|| true` had made the error unobservable. A root the app creates
+	// on first run may not exist yet — skip it, don't fail.
+	for _, pa := range p.Paths {
+		root := fcRoot(pa.Path)
+		if root == "" {
+			continue
+		}
 		q := vm.ShellQuote(root)
-		if _, err := r.Run(fmt.Sprintf("if [ -e %s ]; then sudo restorecon -RF -- %s; fi", q, q)); err != nil {
+		wantType := policy.TypeForKind(p.Name, policy.KindFromString(pa.Kind))
+		out, err := r.Run(fmt.Sprintf("if [ -e %s ]; then sudo restorecon -RF -- %s && stat -c '%%C' -- %s; else echo SKIP; fi", q, q, q))
+		if err != nil {
 			return fmt.Errorf("could not relabel declared root %s on the verifier: %w", root, err)
+		}
+		if lbl := strings.TrimSpace(out); lbl != "SKIP" && !strings.Contains(lbl, ":"+wantType+":") {
+			return fmt.Errorf("declared root %s is labeled %q, not %s — a higher-priority file-context rule is overriding it; refusing to sign a mislabeled claim", root, lbl, wantType)
+		}
+	}
+	// Executables are relabeled here too but their exec-type is verified in the
+	// enforcement loop against the running binary.
+	for _, exe := range p.Executables {
+		q := vm.ShellQuote(exe)
+		if _, err := r.Run(fmt.Sprintf("if [ -e %s ]; then sudo restorecon -RF -- %s; fi", q, q)); err != nil {
+			return fmt.Errorf("could not relabel entrypoint %s on the verifier: %w", exe, err)
 		}
 	}
 	// Assign each declared port and VERIFY it landed under our type. A discarded
@@ -1029,17 +1074,31 @@ func exercise(r vm.Runner, t *target.Target, dom string) ([]avc.Denial, bool, ru
 	if err != nil {
 		return nil, exOK, run, fmt.Errorf("reading audit slice: %w", err)
 	}
-	// Re-stat the inode AFTER the read. The rotation check above happens before
-	// a SEPARATE tail command; a rotation in that window would make tail read the
-	// NEW file at the stale offset and return an empty slice successfully — a
-	// false zero-denial pass (review finding). If the inode changed across the
-	// read, our offset is meaningless and the slice cannot be trusted.
+	// Re-stat SIZE and inode AFTER the read. A rotation between the pre-tail stat
+	// and the SEPARATE tail would make tail read the NEW file at the stale offset
+	// and return an empty slice successfully. Checking only the inode also missed
+	// a SAME-inode TRUNCATION in that window: the file is truncated below our
+	// offset, tail returns empty, and the unchanged inode passed — a false zero-
+	// denial (review finding). Require the inode unchanged AND the size not shrunk
+	// since the pre-tail stat, so the region we read was intact throughout.
 	post2, err := r.Run("sudo stat -c '%i' /var/log/audit/audit.log")
 	if err != nil {
 		return nil, exOK, run, fmt.Errorf("audit log post-read stat: %w", err)
 	}
 	if strings.TrimSpace(post2) != startInode {
 		return nil, exOK, run, fmt.Errorf("audit log rotated during read (inode %s→%s) — re-run", startInode, strings.TrimSpace(post2))
+	}
+	// Same-inode TRUNCATION: the file could be truncated below our offset between
+	// the pre-tail stat and the SEPARATE tail, so tail returns empty successfully
+	// while the inode is unchanged — a false zero-denial the inode check alone
+	// missed (review finding). Re-read the size and fail if it shrank since the
+	// pre-tail stat, so the region we read was intact throughout.
+	post2s, err := r.Run("sudo stat -c '%s' /var/log/audit/audit.log")
+	if err != nil {
+		return nil, exOK, run, fmt.Errorf("audit log post-read size stat: %w", err)
+	}
+	if s := strings.TrimSpace(post2s); s != "" && sizeShrank(postFields[0], s) {
+		return nil, exOK, run, fmt.Errorf("audit log truncated during read (%s→%s bytes) — the slice may be incomplete; re-run", postFields[0], s)
 	}
 	// If the kernel dropped audit records during the window, the slice we just
 	// read may be missing AVCs — a zero-denial result would be a false pass. Only

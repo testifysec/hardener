@@ -81,6 +81,19 @@ func isBroadSystemRoot(root string) bool {
 	return root == "" || broadSystemRoots[root]
 }
 
+// genericPathComponents are directory names too generic to prove app ownership
+// on their own — a compound app name can start with one of them and falsely tie.
+var genericPathComponents = map[string]bool{
+	"system": true, "systemd": true, "etc": true, "usr": true, "var": true,
+	"lib": true, "lib64": true, "bin": true, "sbin": true, "opt": true,
+	"local": true, "share": true, "run": true, "srv": true, "home": true,
+	"root": true, "boot": true, "dev": true, "proc": true, "sys": true,
+	"tmp": true, "mnt": true, "media": true, "libexec": true, "cache": true,
+	"log": true, "spool": true, "default": true, "config": true, "conf": true,
+	"data": true, "www": true, "app": true, "apps": true, "service": true,
+	"services": true, "daemon": true, "server": true,
+}
+
 // pathTiesToApp reports whether some component of root matches the app name at
 // a TOKEN BOUNDARY — the positive-ownership signal for a path claim. A bare
 // shared prefix is deliberately NOT enough: it let a short app name claim an
@@ -100,9 +113,16 @@ func pathTiesToApp(root, appName string) bool {
 		if seg == "" {
 			continue
 		}
-		if seg == app ||
-			strings.HasPrefix(seg, app+"_") ||
-			strings.HasPrefix(app, seg+"_") {
+		if seg == app || strings.HasPrefix(seg, app+"_") {
+			return true
+		}
+		// The "component is a prefix-token of the app name" direction (nats ↔
+		// nats_server) is legitimate only when the component is itself app-specific.
+		// A GENERIC parent directory ("system" in /etc/systemd/system) is a prefix
+		// of a compound app name like system-widget, which would bypass owned:true
+		// and relabel every local unit file (review finding). Generic components
+		// require the explicit ownership override.
+		if strings.HasPrefix(app, seg+"_") && !genericPathComponents[seg] {
 			return true
 		}
 	}

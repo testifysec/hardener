@@ -12,6 +12,7 @@ func passingRunner() *fakeRunner {
 		"getenforce":                "Enforcing\nactive",
 		"stat -c '%s %i'":           "0 4242",
 		"stat -c '%i'":              "4242",
+		"stat -c '%s'":              "0", // audit.log size (unchanged → not truncated)
 		"stat -c %h":                "1", // single hard link (not a shared inode)
 		"auditctl -s":               "enabled 1 lost 0 backlog 0",
 		"is-active widget.service":  "inactive", // cleanly stopped after exercise
