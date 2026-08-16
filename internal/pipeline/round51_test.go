@@ -65,7 +65,10 @@ func TestSpecRollbackVerifiesModuleRestoration(t *testing.T) {
 	spec := GenerateSpec(p, "20260101000000")
 	for _, want := range []string{
 		"rejected widget policy module is still loaded after rollback",
-		"could not restore the previous widget policy module during rollback",
+		// Upgrade branch verifies CONTENT against the snapshot, not just the name
+		// (the rejected module shares the name): re-extract and diff against $_snap.
+		"content did not match the pre-upgrade snapshot",
+		"diff -rq \"$_snap\" \"$_vfy\"",
 		`grep -qE "^widget([[:space:]]|$)"`,
 	} {
 		if !strings.Contains(spec, want) {

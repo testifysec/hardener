@@ -5,7 +5,14 @@ install: |
   url=$(curl -s 'https://plex.tv/api/downloads/5.json' | python3 -c "
   import sys,json
   d=json.load(sys.stdin)
-  print([r['url'] for c in d['computer'].values() for r in c.get('releases',[]) if 'arm64' in r['url'] or 'aarch64' in r['url']][0])")
+  # Restrict to Linux .deb releases (the next step is 'ar x' on a Debian archive)
+  # AND arm64/aarch64; a bare arm64 filter across all platforms could pick a
+  # macOS Apple-Silicon asset. Require EXACTLY ONE match — never guess by order.
+  rels=[r['url'] for c in d['computer'].values() for r in c.get('releases',[])
+        if r['url'].endswith('.deb') and ('arm64' in r['url'] or 'aarch64' in r['url'])]
+  if len(rels)!=1:
+      sys.exit('expected exactly one Linux arm64 .deb release, found %d: %r' % (len(rels), rels))
+  print(rels[0])")
   curl -sLo /tmp/plex.deb "$url"
   sudo dnf -y install binutils xz zstd
   rm -rf /tmp/plexx && mkdir -p /tmp/plexx && cd /tmp/plexx
