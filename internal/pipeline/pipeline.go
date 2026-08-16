@@ -876,10 +876,20 @@ func exercise(r vm.Runner, t *target.Target, dom string) ([]avc.Denial, bool, ru
 		// (domain, exe, digest) changed, fail closed. A same-identity restart
 		// (new pid, same binary/label/digest) is benign; a clean stop by the
 		// scenario (no pid) leaves the pre-capture authoritative.
-		if exOK {
-			if after := captureRunInfo(r, t.Unit); after.ExePath != "" &&
-				(after.ExePath != run.ExePath || after.ExeDigest != run.ExeDigest ||
-					labelType(after.Label) != labelType(run.Label)) {
+		// Only meaningful when the pre-capture actually saw a running process. When
+		// it did, the post-capture MUST still be present AND match: a service that
+		// re-execs different bytes, completes the scenario, then EXITS would leave
+		// an empty post-capture and — with the old "skip when absent" guard — pass
+		// on the pre-exercise digest (review finding). An empty post-capture after a
+		// non-empty pre-capture means the confined process did not survive the
+		// exercise, so we cannot bind a single executed image.
+		if exOK && run.ExePath != "" {
+			after := captureRunInfo(r, t.Unit)
+			switch {
+			case after.ExePath == "":
+				return nil, false, run, fmt.Errorf(
+					"the exercised process (%s) exited during the scenario — cannot confirm the same image ran throughout; hardener binds long-running confined services, not Type=oneshot workloads", run.ExePath)
+			case after.ExePath != run.ExePath || after.ExeDigest != run.ExeDigest || labelType(after.Label) != labelType(run.Label):
 				return nil, false, run, fmt.Errorf(
 					"the exercised process changed identity mid-run (before exe=%s sha=%s label=%s; after exe=%s sha=%s label=%s) — the verdict cannot bind a single executed image",
 					run.ExePath, run.ExeDigest, run.Label, after.ExePath, after.ExeDigest, after.Label)

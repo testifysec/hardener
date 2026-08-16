@@ -209,7 +209,12 @@ if [ "$_op" = 1 ]; then
     # by the base policy, or by another package. Loading ours would silently
     # shadow it, and a rollback would remove it (semodule -r), destroying
     # unrelated policy. Refuse before mutating anything (review finding).
-    if semodule -l 2>/dev/null | grep -qE "^%[1]s( |$)"; then
+    # Capture the module list and FAIL CLOSED if enumeration fails. Piping
+    # semodule -l straight into grep masks a semodule failure as "module absent"
+    # (the pipeline status is grep's), so a broken query would let us overwrite a
+    # foreign module (review finding).
+    _modlist="$(semodule -l 2>/dev/null)" || { echo "ERROR: 'semodule -l' failed on fresh install; cannot confirm the %[1]s module is absent — refusing to risk shadowing a foreign module" >&2; exit 1; }
+    if printf '%%s\n' "$_modlist" | grep -qE "^%[1]s( |$)"; then
         echo "ERROR: a SELinux module named %[1]s already exists, but this is a fresh install; refusing to shadow a foreign module. Remove it first or build with a distinct name." >&2
         exit 1
     fi
@@ -235,9 +240,8 @@ _rollback() {
         semodule -r %[1]s 2>/dev/null || :
 %[6]s
     elif [ -n "$_snap" ]; then
-        # Upgrade failure: reinstall the previous module, re-apply its labels, and
-        # RESTORE the port mappings this transaction pruned — the prior working
-        # policy is fully back in place (review finding).
+        # Upgrade failure: reinstall the previous module and re-apply its labels —
+        # the prior working policy is back in place (review finding).
         ( cd "$_snap" && { semodule -i %[1]s.cil || semodule -i %[1]s.pp; } ) 2>/dev/null || :
 %[6]s
         # Re-apply the PREVIOUS module's labels on ALL of its roots — including
@@ -251,8 +255,13 @@ _rollback() {
                 restorecon -RF -- "$_oldroot" 2>/dev/null || :
             done < %%{_datadir}/selinux/hardener/%[1]s.oldroots
         fi
-        for _row in $_pruned; do _rp=${_row%%%%:*}; _rn=${_row##*:}; semanage port -a -t %[7]s -p "$_rp" "$_rn" 2>/dev/null || :; done
     fi
+    # RESTORE the port mappings THIS transaction pruned — in EVERY rollback path.
+    # Reconciliation runs on fresh installs too (it prunes stale <app>_port_t
+    # mappings a foreign/orphaned policy left behind), so a fresh-install failure
+    # that only removed the module would otherwise permanently drop those
+    # pre-existing mappings (review finding).
+    for _row in $_pruned; do _rp=${_row%%%%:*}; _rn=${_row##*:}; semanage port -a -t %[7]s -p "$_rp" "$_rn" 2>/dev/null || :; done
     # (On upgrade $_snap is always set — we abort above if the snapshot fails.)
 }
 trap _rollback EXIT

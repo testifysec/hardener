@@ -191,3 +191,46 @@ func TestSpecPostChecksEntrypointHardLinks(t *testing.T) {
 		t.Errorf("%%post must check entrypoint hard-link count before relabel:\n%s", spec)
 	}
 }
+
+// Round 31: a service that re-execs then EXITS leaves an empty post-exercise
+// capture; the old guard skipped the check and passed on the pre-exercise
+// digest. A non-empty pre-capture now REQUIRES a matching post-capture.
+func TestExerciseFailsClosedWhenProcessExits(t *testing.T) {
+	tgt := &target.Target{
+		Name: "widget", Unit: "widget.service", Install: "true",
+		Exercise: "true", Executables: []string{"/opt/widget/bin/widgetd"},
+	}
+	f := &fakeRunner{
+		responses: map[string]string{
+			"stat -c '%s %i'": "0 4242",
+			"stat -c '%i'":    "4242",
+			"auditctl -s":     "enabled 1 lost 0 backlog 0",
+		},
+		seq: map[string][]string{
+			// Present before the scenario, gone after (the process exited).
+			"systemctl show -p MainPID": {
+				"LABEL:system_u:system_r:widget_t:s0\nEXE:/opt/widget/bin/widgetd\nEXESHA:" + strings.Repeat("ab", 32),
+				"NO_PID",
+			},
+		},
+	}
+	if _, _, _, err := exercise(f, tgt, "widget_t"); err == nil || !strings.Contains(err.Error(), "exited during the scenario") {
+		t.Fatalf("a process that exits mid-run must fail closed, got %v", err)
+	}
+}
+
+// Round 31: the fresh-install pre-existing-module check must capture semodule -l
+// and fail closed on enumeration error (piping to grep masked semodule failures),
+// and _pruned port mappings must be restored in EVERY rollback path.
+func TestSpecFreshInstallModuleCheckAndPrunedRestore(t *testing.T) {
+	spec := GenerateSpec(testTarget().Profile(), "20260101000000")
+	if !strings.Contains(spec, "_modlist=") || !strings.Contains(spec, "'semodule -l' failed") {
+		t.Errorf("fresh-install module check must capture+validate semodule -l:\n%s", spec)
+	}
+	// The _pruned restore loop must sit OUTSIDE the upgrade-only elif — i.e. after
+	// the closing `fi` of the module-restore block, before the function closes.
+	idx := strings.Index(spec, "in EVERY rollback path")
+	if idx < 0 {
+		t.Errorf("_pruned must be restored in every rollback path:\n%s", spec)
+	}
+}
