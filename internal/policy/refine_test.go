@@ -186,3 +186,56 @@ func TestEntrypointsClassifiedBeforeMerge(t *testing.T) {
 		t.Errorf("both mislabeled entrypoints must be detected before merge collapses them, got %d: %+v", len(res.Entrypoints), res.Entrypoints)
 	}
 }
+
+// A W^X violation on an owned CONFIG type (_conf_t) matches none of Refine's
+// per-denial suffix buckets (_content_t/_exec_t self-modification, or the
+// writable data suffixes), so the accumulated rule ships unflagged unless the
+// cumulative scan catches it. This is the exact code-injection primitive Codex
+// flagged: executable, application-writable configuration.
+func TestFlagWriteExecRulesFlagsOwnedConfType(t *testing.T) {
+	p := widgetProfile()
+	rules := []AllowRule{
+		{Source: "widget_t", Target: "widget_conf_t", Class: "file", Perms: []string{"write", "execute", "execute_no_trans"}},
+	}
+	flags := FlagWriteExecRules(p, rules)
+	if len(flags) != 1 {
+		t.Fatalf("owned _conf_t with write+execute must be flagged, got %+v", flags)
+	}
+	if !strings.Contains(flags[0].Reason, "W^X") || !strings.Contains(flags[0].Reason, "widget_conf_t") {
+		t.Errorf("flag reason: %q", flags[0].Reason)
+	}
+}
+
+// The cross-round accumulation case: a write granted in one refinement round and
+// an execute in another merge (via normalizeRules) into a single owned-type rule.
+// Neither half is dangerous alone, but the union is a W^X violation the
+// per-round refiner cannot see. FlagWriteExecRules scans the merged set.
+func TestFlagWriteExecRulesCatchesMergedWriteAndExecute(t *testing.T) {
+	p := widgetProfile()
+	// write-only alone: not a violation.
+	if f := FlagWriteExecRules(p, []AllowRule{{Source: "widget_t", Target: "widget_conf_t", Class: "file", Perms: []string{"write"}}}); len(f) != 0 {
+		t.Errorf("write-only must not be flagged, got %+v", f)
+	}
+	// execute-only alone: not a violation (executing a read-only config is fine).
+	if f := FlagWriteExecRules(p, []AllowRule{{Source: "widget_t", Target: "widget_conf_t", Class: "file", Perms: []string{"execute"}}}); len(f) != 0 {
+		t.Errorf("execute-only must not be flagged, got %+v", f)
+	}
+	// The merged rule (both perms on the same owned target) IS a violation.
+	merged := []AllowRule{{Source: "widget_t", Target: "widget_conf_t", Class: "file", Perms: []string{"execute", "write"}}}
+	if f := FlagWriteExecRules(p, merged); len(f) != 1 {
+		t.Fatalf("merged write+execute must be flagged, got %+v", f)
+	}
+}
+
+// read+execute (no content-modifying perm) is not W^X, and a FOREIGN type is not
+// this scanner's concern (Refine's foreign-type check owns that path) — guard
+// against over-flagging both.
+func TestFlagWriteExecRulesIgnoresReadExecAndForeign(t *testing.T) {
+	p := widgetProfile()
+	if f := FlagWriteExecRules(p, []AllowRule{{Source: "widget_t", Target: "widget_conf_t", Class: "file", Perms: []string{"read", "open", "execute"}}}); len(f) != 0 {
+		t.Errorf("read+execute is not W^X, got %+v", f)
+	}
+	if f := FlagWriteExecRules(p, []AllowRule{{Source: "widget_t", Target: "foreign_conf_t", Class: "file", Perms: []string{"write", "execute"}}}); len(f) != 0 {
+		t.Errorf("foreign type is not owned; this scanner must ignore it, got %+v", f)
+	}
+}

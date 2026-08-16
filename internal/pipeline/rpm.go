@@ -250,9 +250,12 @@ if [ "$_op" = 1 ]; then
     # Capture the module list and FAIL CLOSED if enumeration fails. Piping
     # semodule -l straight into grep masks a semodule failure as "module absent"
     # (the pipeline status is grep's), so a broken query would let us overwrite a
-    # foreign module (review finding).
+    # foreign module (review finding). The name is followed by ANY whitespace or
+    # end-of-line: older semodule prints "name\tversion" (tab), newer prints the
+    # bare name. Matching a literal space only would miss the tab-delimited form
+    # and let us shadow a foreign same-name module (review finding).
     _modlist="$(semodule -l 2>/dev/null)" || { echo "ERROR: 'semodule -l' failed on fresh install; cannot confirm the %[1]s module is absent — refusing to risk shadowing a foreign module" >&2; exit 1; }
-    if printf '%%s\n' "$_modlist" | grep -qE "^%[1]s( |$)"; then
+    if printf '%%s\n' "$_modlist" | grep -qE "^%[1]s([[:space:]]|$)"; then
         echo "ERROR: a SELinux module named %[1]s already exists, but this is a fresh install; refusing to shadow a foreign module. Remove it first or build with a distinct name." >&2
         exit 1
     fi
