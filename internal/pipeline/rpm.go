@@ -15,6 +15,20 @@ import (
 func buildRPM(r vm.Runner, p *profile.Profile, revision, te, fc string) (string, error) {
 	app := policy.SafeName(p.Name)
 	spec := GenerateSpec(p, revision)
+	// Fail closed on a spec/FC mismatch. %post relabels every p.Paths root and
+	// VERIFIES it receives the app type, but a path with no mapping in the shipped
+	// .fc can never get that type — restorecon's verify fails and the RPM does not
+	// install. The live pipeline trims base-policy-collided paths from p.Paths IN
+	// PLACE before it derives BOTH the .fc and this spec, so they agree; this guard
+	// makes that invariant explicit and refuses to package an RPM that would fail to
+	// install if a caller ever shipped a collision-trimmed .fc with an untrimmed
+	// profile (review finding — round 66). Executables are never trimmed: an
+	// entrypoint collision is fatal earlier, so only data/config paths can diverge.
+	for _, pa := range p.Paths {
+		if !strings.Contains(fc, pa.Path+"\t") {
+			return "", fmt.Errorf("internal: the RPM spec would relabel %q but the shipped file-contexts have no mapping for it — %%post's label verification would fail and the RPM would not install; refusing to package inconsistent policy", pa.Path)
+		}
+	}
 	if err := r.WriteFile(fmt.Sprintf("/tmp/hardener/%s/%s-selinux.spec", app, app), spec); err != nil {
 		return "", err
 	}

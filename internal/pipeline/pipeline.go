@@ -1435,6 +1435,20 @@ func exercise(r vm.Runner, t *target.Target, dom string) ([]avc.Denial, bool, ru
 	if auditEnabledReconfigured(out) {
 		return nil, exOK, run, fmt.Errorf("auditing was reconfigured during the exercise (a CONFIG_CHANGE audit_enabled record is in the audit window) — a workload toggled audit state, which can suppress denials and fake a zero-denial pass; refusing")
 	}
+	// recheck() samples the module store only BEFORE and AFTER the exercise, so a
+	// privileged exercise that loads a broad allow module, runs the workload with no
+	// denials, then removes it before returning would pass both samples while the
+	// packaged policy was never genuinely exercised. Every module load/unload
+	// triggers a kernel MAC_POLICY_LOAD record, and the swap happens during the
+	// exercise — before the sentinel — so it lands in our window. No legitimate
+	// policy load occurs during the exercise (our module is loaded before the offset
+	// snapshot), so any MAC_POLICY_LOAD here is a transient swap; fail closed (review
+	// finding — round 66). NOTE: like the audit-enable check, this rests on the audit
+	// window being append-only; a privileged exercise that truncates the log to erase
+	// this record is the deferred trusted-observation-channel problem.
+	if auditPolicyReloaded(out) {
+		return nil, exOK, run, fmt.Errorf("the SELinux policy was reloaded during the exercise (a MAC_POLICY_LOAD record is in the audit window) — a transient module swap can suppress denials and fake a clean enforcement; refusing")
+	}
 	for _, te := range avc.ParseTransitionErrors(out) {
 		if te.NewType == dom {
 			return nil, exOK, run, fmt.Errorf(
@@ -1542,6 +1556,20 @@ func moduleContentDigest(r vm.Runner, appMod string) (string, error) {
 func auditEnabledReconfigured(window string) bool {
 	for _, line := range strings.Split(window, "\n") {
 		if strings.Contains(line, "CONFIG_CHANGE") && strings.Contains(line, "audit_enabled=") {
+			return true
+		}
+	}
+	return false
+}
+
+// auditPolicyReloaded reports whether the audit window contains a kernel
+// MAC_POLICY_LOAD record — emitted on every SELinux policy (module) load or
+// unload. Our module is loaded before the exercise's audit offset is snapshotted,
+// so no legitimate policy load happens inside the window; a record here means a
+// module was swapped in and out during the exercise to suppress AVCs.
+func auditPolicyReloaded(window string) bool {
+	for _, line := range strings.Split(window, "\n") {
+		if strings.Contains(line, "MAC_POLICY_LOAD") {
 			return true
 		}
 	}
