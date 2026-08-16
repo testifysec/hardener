@@ -1412,12 +1412,28 @@ func exercise(r vm.Runner, t *target.Target, dom string) ([]avc.Denial, bool, ru
 	// read may be missing AVCs — a zero-denial result would be a false pass. Only
 	// enforced when both snapshots were readable (auditctl present) so a
 	// stat/audit-less environment is not spuriously blocked (review finding).
-	_, lost1, _, auOK1 := auditStatus(r)
+	en1, lost1, _, auOK1 := auditStatus(r)
 	if !auOK1 {
 		return nil, exOK, run, fmt.Errorf("cannot query audit status (auditctl -s) after the exercise — refusing to trust a denial set whose completeness is unconfirmed (review finding)")
 	}
 	if lost0 >= 0 && lost1 > lost0 {
 		return nil, exOK, run, fmt.Errorf("kernel audit records were lost during the exercise (lost %d→%d) — the denial set is incomplete; re-run on a less loaded verifier", lost0, lost1)
+	}
+	// Auditing must STILL be enabled afterward. A privileged/untrusted exercise can
+	// `auditctl -e 0` and never re-enable, leaving every AVC unrecorded; the before
+	// snapshot required enabled≠0, so require it after too (review finding — round 65).
+	if en1 == 0 {
+		return nil, exOK, run, fmt.Errorf("auditing was disabled during the exercise (auditctl -s enabled=0 afterward) — denials went unrecorded; refusing to trust a zero-denial result")
+	}
+	// The subtler evasion: `auditctl -e 0`, do denial-worthy work, then `auditctl -e 1`.
+	// Both snapshots then read enabled=1 and the lost counter never moves (nothing was
+	// queued to lose), so the enabled/lost checks pass while AVCs were silently
+	// suppressed. But the kernel logs a CONFIG_CHANGE record for EVERY audit_enabled
+	// transition, and the toggle happens during t.Exercise — before the sentinel — so
+	// that record is inside our window. Its presence means auditing was reconfigured
+	// mid-exercise; fail closed (review finding — round 65).
+	if auditEnabledReconfigured(out) {
+		return nil, exOK, run, fmt.Errorf("auditing was reconfigured during the exercise (a CONFIG_CHANGE audit_enabled record is in the audit window) — a workload toggled audit state, which can suppress denials and fake a zero-denial pass; refusing")
 	}
 	for _, te := range avc.ParseTransitionErrors(out) {
 		if te.NewType == dom {
@@ -1516,6 +1532,20 @@ func moduleContentDigest(r vm.Runner, appMod string) (string, error) {
 		return "", fmt.Errorf("could not compute a valid sha256 for module %s content (output=%q)", appMod, trimmed)
 	}
 	return f[0], nil
+}
+
+// auditEnabledReconfigured reports whether the audit window contains a kernel
+// CONFIG_CHANGE record altering the audit_enabled flag — the unavoidable trace of
+// a workload toggling auditing off (and back on) to suppress AVCs mid-exercise.
+// A clean observation never reconfigures auditing (the sentinel uses `auditctl -m`,
+// a USER record, not a config change), so any such record is tampering.
+func auditEnabledReconfigured(window string) bool {
+	for _, line := range strings.Split(window, "\n") {
+		if strings.Contains(line, "CONFIG_CHANGE") && strings.Contains(line, "audit_enabled=") {
+			return true
+		}
+	}
+	return false
 }
 
 func auditStatus(r vm.Runner) (enabled, lost, backlog int, ok bool) {
