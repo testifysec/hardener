@@ -86,7 +86,7 @@ func GenerateSpec(p *profile.Profile, revision string) string {
 			"_desired=\"%[2]s \"\n"+
 				"for _row in $(semanage port -l | awk '$1==\"%[1]s\"{for(i=3;i<=NF;i++){gsub(\",\",\"\",$i); print $2\":\"$i}}'); do "+
 				"case \"$_desired\" in *\" $_row \"*) : ;; "+
-				"*) _pp=${_row%%%%:*}; _pn=${_row##*:}; semanage port -d -t %[1]s -p \"$_pp\" \"$_pn\" 2>/dev/null || echo \"warning: could not prune stale port $_row from %[1]s\" >&2 ;; esac; done\n",
+				"*) _pp=${_row%%%%:*}; _pn=${_row##*:}; semanage port -d -t %[1]s -p \"$_pp\" \"$_pn\" 2>/dev/null || { echo \"ERROR: could not prune stale port $_row from %[1]s — refusing to leave an undeclared bind privilege\" >&2; exit 1; } ;; esac; done\n",
 			appPortType, desired.String())
 	}
 	for _, port := range p.Ports {
@@ -160,6 +160,11 @@ _rollback() {
     # the loaded module rather than leaving the service with none.
     [ "$_op" = 1 ] || return 0
     semodule -r %[1]s 2>/dev/null || :
+    # After removing the module, RESTORE base file labels — the entrypoints and
+    # data were already relabeled to <app>_* types that are now undefined, so
+    # leaving them labeled would make them inaccessible (review finding). Same
+    # restoration the uninstall path performs.
+%[6]s
 }
 trap _rollback EXIT
 if ! semodule -i %%{_datadir}/selinux/packages/%[1]s.pp; then

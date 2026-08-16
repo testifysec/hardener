@@ -144,18 +144,21 @@ func ParseLog(log string) []Denial {
 	return out
 }
 
-// Merge collapses denials sharing (source, target, class) and unions their perms.
+// Merge collapses denials sharing (source, target, class, PATH, inode) and
+// unions their perms. Path and inode are part of the key: two distinct paths
+// that happen to share a SELinux type must NOT be folded into one denial — that
+// dropped a path and let a per-path classification (a relabel, or which file is
+// the mislabeled entrypoint) apply to the wrong file (review finding). Type-wide
+// allow rules that lose their path are re-collapsed by (source,target,class)
+// downstream (normalizeRules), so nothing over-broadens.
 func Merge(ds []Denial) []Denial {
-	type key struct{ s, t, c string }
+	type key struct{ s, t, c, p, i string }
 	idx := map[key]int{}
 	var out []Denial
 	for _, d := range ds {
-		k := key{d.SourceType, d.TargetType, d.Class}
+		k := key{d.SourceType, d.TargetType, d.Class, d.Path, d.Ino}
 		if i, ok := idx[k]; ok {
 			out[i].Perms = unionSorted(out[i].Perms, d.Perms)
-			if out[i].Path == "" {
-				out[i].Path = d.Path
-			}
 			continue
 		}
 		idx[k] = len(out)
