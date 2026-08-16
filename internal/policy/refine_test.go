@@ -114,3 +114,21 @@ func TestRenderRefinement(t *testing.T) {
 		t.Errorf("rendered:\n%s", out)
 	}
 }
+
+// Round 42: process/process2 permissions use a fail-closed ALLOWLIST — context-
+// manipulation perms (setexec, setcap, ...) must be flagged, benign ones not.
+func TestProcessPermsAreAllowlisted(t *testing.T) {
+	p := widgetProfile()
+	for _, perm := range []string{"setexec", "setcurrent", "setfscreate", "setkeycreate", "setsockcreate", "setcap", "dyntransition"} {
+		ds := []avc.Denial{{SourceType: "widget_t", TargetType: "widget_t", Class: "process", Perms: []string{perm}}}
+		res := Refine(p, ds)
+		if len(res.Flags) == 0 {
+			t.Errorf("privileged process perm %q must be flagged for review", perm)
+		}
+	}
+	// Benign self-process perms are not flagged.
+	ds := []avc.Denial{{SourceType: "widget_t", TargetType: "widget_t", Class: "process", Perms: []string{"fork", "sigchld", "signal"}}}
+	if res := Refine(p, ds); len(res.Flags) != 0 {
+		t.Errorf("benign process perms must not be flagged: %+v", res.Flags)
+	}
+}

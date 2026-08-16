@@ -17,13 +17,26 @@ import (
 //
 // Narrowing this set toward true least-privilege (observation-gating each
 // interface) is tracked as follow-up; today it is generous-but-declared.
+// capability2Perms are the SELinux capabilities that belong to the `capability2`
+// object class (index 32+); everything else is `capability`. Emitting these under
+// `self:capability` yields an uncompilable module.
+var capability2Perms = map[string]bool{
+	"mac_override": true, "mac_admin": true, "syslog": true, "wake_alarm": true,
+	"block_suspend": true, "audit_read": true, "perfmon": true, "bpf": true,
+	"checkpoint_restore": true,
+}
+
 var BaseInterfaces = []string{
 	"kernel_read_system_state",
 	"corecmd_exec_bin",
 	"corecmd_exec_shell",
 	"libs_exec_ldconfig",
 	"miscfiles_read_localization",
-	"miscfiles_read_generic_certs",
+	// miscfiles_read_generic_certs is deliberately NOT here: it grants cert_t read
+	// unconditionally, which suppresses the AVC that the cert_t review gate needs
+	// — cert_t also labels TLS PRIVATE KEYS, so reading it must go to review, not
+	// be granted in the base (review finding). A daemon that reads its own certs
+	// gets a flagged rule the operator accepts after review.
 	"logging_send_syslog_msg",
 	"files_read_etc_files",
 	"files_read_usr_files",
@@ -166,7 +179,23 @@ func GenerateTE(p *profile.Profile) string {
 	}
 
 	if len(p.Capabilities) > 0 {
-		fmt.Fprintf(&b, "\nallow %s self:capability { %s };\n", dom, strings.Join(p.Capabilities, " "))
+		// Partition by SELinux class. capability2 caps (bpf, perfmon, syslog, ...)
+		// emitted under `self:capability` produce an uncompilable module (review
+		// finding). Each cap goes under its correct class.
+		var cap1, cap2 []string
+		for _, c := range p.Capabilities {
+			if capability2Perms[c] {
+				cap2 = append(cap2, c)
+			} else {
+				cap1 = append(cap1, c)
+			}
+		}
+		if len(cap1) > 0 {
+			fmt.Fprintf(&b, "\nallow %s self:capability { %s };\n", dom, strings.Join(cap1, " "))
+		}
+		if len(cap2) > 0 {
+			fmt.Fprintf(&b, "allow %s self:capability2 { %s };\n", dom, strings.Join(cap2, " "))
+		}
 	}
 
 	if len(p.Interfaces) > 0 {

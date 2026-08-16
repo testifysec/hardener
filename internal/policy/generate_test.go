@@ -99,3 +99,29 @@ func TestFCEscapesRegexMeta(t *testing.T) {
 		t.Errorf("literal space or [ ] must never reach an fc line:\n%s", fc)
 	}
 }
+
+// Round 42: capability2 caps (bpf/perfmon) must be emitted under self:capability2,
+// not self:capability, or the module fails to compile.
+func TestCapabilitiesPartitionedByClass(t *testing.T) {
+	p := &profile.Profile{Name: "widget", Capabilities: []string{"net_bind_service", "bpf", "perfmon"}}
+	te := GenerateTE(p)
+	if !strings.Contains(te, "self:capability { net_bind_service }") && !strings.Contains(te, "self:capability {net_bind_service}") {
+		t.Errorf("v1 capability must stay under self:capability:\n%s", te)
+	}
+	if !strings.Contains(te, "self:capability2 {") || !strings.Contains(te, "bpf") || !strings.Contains(te, "perfmon") {
+		t.Errorf("capability2 caps must be emitted under self:capability2:\n%s", te)
+	}
+	if strings.Contains(te, "self:capability { net_bind_service bpf perfmon }") {
+		t.Error("capability2 caps must NOT be emitted under self:capability")
+	}
+}
+
+// Round 42: cert_t must not be granted by a base interface (it would suppress the
+// review AVC for TLS private keys).
+func TestBaseInterfacesOmitGenericCertRead(t *testing.T) {
+	for _, iface := range BaseInterfaces {
+		if iface == "miscfiles_read_generic_certs" {
+			t.Error("miscfiles_read_generic_certs must not be a base grant (defeats cert_t review)")
+		}
+	}
+}
