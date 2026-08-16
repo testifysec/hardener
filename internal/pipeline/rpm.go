@@ -85,17 +85,40 @@ func GenerateSpec(p *profile.Profile, revision string) string {
 			continue
 		}
 		wantType := policy.TypeForKind(p.Name, policy.KindFromString(pa.Kind))
+		// Prune any OTHER declared sub-root under THIS root from the descendant
+		// scan — those legitimately carry their own app type (mirror the
+		// verifier-side installPolicy check).
+		prune := ""
+		for _, pa2 := range p.Paths {
+			other := fcRoot(pa2.Path)
+			if other == "" || other == root {
+				continue
+			}
+			if strings.HasPrefix(strings.TrimRight(other, "/")+"/", strings.TrimRight(root, "/")+"/") {
+				prune += fmt.Sprintf("-path %s -prune -o ", vm.ShellQuote(other))
+			}
+		}
 		fmt.Fprintf(&relabel,
 			"_r=%[1]s\n"+
+				// The local file-context OVERLAP check runs REGARDLESS of existence: a
+				// rule UNDER our root would mislabel files the app creates on first run,
+				// so gating it on [ -e ] let a not-yet-created data dir install with a
+				// latent broader label on its future contents (review finding). Capture
+				// the listing and FAIL CLOSED on enumeration error — piping it straight
+				// into awk|grep masked a semanage failure (review finding).
+				"_lfc=\"$(semanage fcontext -C -l 2>/dev/null)\" || { printf 'ERROR: could not enumerate local file-contexts for %%s; refusing\\n' \"$_r\" >&2; exit 1; }; "+
+				"if printf '%%s\\n' \"$_lfc\" | awk '{print $1}' | grep -q \"^$_r/\"; then printf 'ERROR: a local file-context rule under %%s could override the app labeling; refusing\\n' \"$_r\" >&2; exit 1; fi\n"+
 				"if [ -e \"$_r\" ]; then restorecon -RF -- \"$_r\" || { printf 'ERROR: could not relabel declared root %%s; refusing to leave it under a broader label\\n' \"$_r\" >&2; exit 1; }; "+
 				"_rl=$(stat -c '%%C' -- \"$_r\" 2>/dev/null); case \"$_rl\" in *:%[2]s:*) : ;; *) printf 'ERROR: declared root %%s is labeled %%s, not %[2]s — a higher-priority file-context rule is overriding it\\n' \"$_r\" \"$_rl\" >&2; exit 1 ;; esac; "+
-				// A LOCAL file-context rule UNDER our root can override the labeling on
-				// a descendant while the root itself verifies correctly (review finding).
-				// Capture the listing and FAIL CLOSED on enumeration error — piping it
-				// straight into awk|grep masked a semanage failure (review finding).
-				"_lfc=\"$(semanage fcontext -C -l 2>/dev/null)\" || { printf 'ERROR: could not enumerate local file-contexts for %%s; refusing\\n' \"$_r\" >&2; exit 1; }; "+
-				"if printf '%%s\\n' \"$_lfc\" | awk '{print $1}' | grep -q \"^$_r/\"; then printf 'ERROR: a local file-context rule under %%s could override the app labeling; refusing\\n' \"$_r\" >&2; exit 1; fi; fi\n",
-			vm.ShellQuote(root), wantType)
+				// Verify DESCENDANTS, not just the root: a more-specific BASE-policy rule
+				// beneath a broad declared root retains a different label while the root
+				// verifies correctly (review finding — the local-fcontext grep above only
+				// catches LOCAL customizations, not base file_contexts). Prune legitimately
+				// overlapping declared sub-roots, stop at the FIRST mismatch (-quit), and
+				// FAIL CLOSED on a find error — mirrors the verifier-side check exactly.
+				"_bad=$(find \"$_r\" %[3]s\\( -type f -o -type d \\) ! -context '*:%[2]s:*' -print -quit 2>/dev/null) || { printf 'ERROR: could not verify descendant labels under %%s; refusing\\n' \"$_r\" >&2; exit 1; }; "+
+				"if [ -n \"$_bad\" ]; then printf 'ERROR: descendant %%s under declared root %%s is not labeled %[2]s — a more-specific file-context rule is overriding it\\n' \"$_bad\" \"$_r\" >&2; exit 1; fi; fi\n",
+			vm.ShellQuote(root), wantType, prune)
 	}
 	// PASS 3 — relabel + VERIFY each entrypoint. The label is load-bearing:
 	// without _exec_t the domain transition never fires and the service runs

@@ -163,3 +163,35 @@ func TestMergeKeepsDistinctPorts(t *testing.T) {
 		t.Fatalf("distinct ports must not merge, got %d: %+v", len(out), out)
 	}
 }
+
+// A PATH record can carry a RELATIVE name (the syscall used a relative path),
+// with the working directory in a sibling type=CWD record. Correlating them
+// yields the absolute path; taking name= verbatim would leave a bare basename
+// that matches no file-context pattern, so a mislabel is misread as a missing
+// permission and over-granted type-wide. (review finding — round 49)
+func TestParseLogResolvesRelativePathAgainstCWD(t *testing.T) {
+	log := `type=AVC msg=audit(1723640005.000:500): avc:  denied  { write } for  pid=1234 comm="widgetd" ino=42 scontext=system_u:system_r:widget_t:s0 tcontext=system_u:object_r:var_lib_t:s0 tclass=file permissive=1
+type=CWD msg=audit(1723640005.000:500): cwd="/var/lib/widget"
+type=PATH msg=audit(1723640005.000:500): item=0 name="sub/state.db" inode=42 dev="vda2" mode=0100644`
+	ds := ParseLogWithPaths(log + "\n")
+	if len(ds) != 1 {
+		t.Fatalf("want 1 denial, got %d: %+v", len(ds), ds)
+	}
+	if ds[0].Path != "/var/lib/widget/sub/state.db" {
+		t.Errorf("relative name must resolve against CWD, got %q", ds[0].Path)
+	}
+}
+
+// An absolute PATH name is unaffected by any CWD record.
+func TestParseLogKeepsAbsolutePathDespiteCWD(t *testing.T) {
+	log := `type=AVC msg=audit(1723640006.000:501): avc:  denied  { read } for  pid=1234 comm="widgetd" ino=7 scontext=system_u:system_r:widget_t:s0 tcontext=system_u:object_r:etc_t:s0 tclass=file permissive=1
+type=CWD msg=audit(1723640006.000:501): cwd="/tmp"
+type=PATH msg=audit(1723640006.000:501): item=0 name="/etc/widget/widget.conf" inode=7 dev="vda2"`
+	ds := ParseLogWithPaths(log + "\n")
+	if len(ds) != 1 {
+		t.Fatalf("want 1 denial, got %d: %+v", len(ds), ds)
+	}
+	if ds[0].Path != "/etc/widget/widget.conf" {
+		t.Errorf("absolute name must be preserved, got %q", ds[0].Path)
+	}
+}

@@ -414,3 +414,28 @@ paths:
 		}
 	}
 }
+
+// /usr/local/lib/systemd is the local-admin tier of systemd's unit load path;
+// claiming it (or a descendant) with owned: true would let restorecon -RF
+// relabel every locally installed unit. Reject it like the other shared trees.
+// (review finding — round 49)
+func TestLoadRejectsUsrLocalLibSystemdTrees(t *testing.T) {
+	const m = `name: widget
+install: "true"
+unit: widget.service
+exercise: "true"
+executables:
+  - /opt/widget/bin/widgetd
+paths:
+  - { path: %q, kind: conf, owned: true }
+`
+	for _, p := range []string{
+		"/usr/local/lib/systemd/system(/.*)?",
+		"/usr/local/lib/systemd/user(/.*)?",
+		"/usr/local/lib/systemd/system/widget.service.d(/.*)?",
+	} {
+		if _, err := Load(write(t, fmt.Sprintf(m, p))); err == nil {
+			t.Errorf("%s must be rejected even with owned: true", p)
+		}
+	}
+}
