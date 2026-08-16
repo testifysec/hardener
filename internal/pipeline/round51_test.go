@@ -65,6 +65,10 @@ func TestSpecRollbackVerifiesModuleRestoration(t *testing.T) {
 	spec := GenerateSpec(p, "20260101000000")
 	for _, want := range []string{
 		"rejected widget policy module is still loaded after rollback",
+		// Fresh-install branch CAPTURES semodule -l and fails closed if it could
+		// not enumerate (piping straight into grep was fail-open).
+		"cannot verify removal of the rejected widget policy module",
+		"_ml=\"$(semodule -l 2>/dev/null)\"",
 		// Upgrade branch verifies CONTENT against the snapshot, not just the name
 		// (the rejected module shares the name): re-extract and diff against $_snap.
 		"content did not match the pre-upgrade snapshot",
