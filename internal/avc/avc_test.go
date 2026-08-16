@@ -151,3 +151,15 @@ func TestMergeKeepsDistinctPaths(t *testing.T) {
 		t.Errorf("same path+type must union perms into one denial: %+v", same)
 	}
 }
+
+// Round 23: two name_bind denials on DIFFERENT ports share the same *_port_t
+// type/class and must not collapse to the first port (Src is part of the key).
+func TestMergeKeepsDistinctPorts(t *testing.T) {
+	out := Merge([]Denial{
+		{SourceType: "app_t", TargetType: "http_port_t", Class: "tcp_socket", Perms: []string{"name_bind"}, Src: 8080},
+		{SourceType: "app_t", TargetType: "http_port_t", Class: "tcp_socket", Perms: []string{"name_bind"}, Src: 8443},
+	})
+	if len(out) != 2 {
+		t.Fatalf("distinct ports must not merge, got %d: %+v", len(out), out)
+	}
+}

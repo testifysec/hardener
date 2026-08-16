@@ -118,7 +118,15 @@ func Load(path string) (*Target, error) {
 			return nil, fmt.Errorf("%s: paths[%d]: missing path", path, i)
 		}
 		if !policy.KnownKind(pa.Kind) {
-			return nil, fmt.Errorf("%s: paths[%d] (%s): unknown kind %q — must be one of exec, conf, var_lib, log, runtime, content, tmp, cache, unit", path, i, pa.Path, pa.Kind)
+			return nil, fmt.Errorf("%s: paths[%d] (%s): unknown kind %q — must be one of conf, var_lib, log, runtime, content, tmp, cache, unit", path, i, pa.Path, pa.Kind)
+		}
+		// kind:exec in a PATH bypasses the app-ownership check that guards the
+		// executables list — GenerateFC maps it straight to <app>_exec_t, so a
+		// path like /usr/bin/curl could relabel a shared binary and route
+		// unrelated launches into the domain (review finding). Entrypoints must
+		// go through `executables`, which validates ownership.
+		if pa.Kind == "exec" {
+			return nil, fmt.Errorf("%s: paths[%d] (%s): kind 'exec' is not allowed in paths — declare entrypoints under 'executables' (which validates app ownership)", path, i, pa.Path)
 		}
 		// A path claim must be a BOUNDED, app-specific tree. GenerateFC emits it
 		// as a file-context regex and %post runs `restorecon -RF` on its root, so

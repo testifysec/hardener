@@ -37,7 +37,7 @@ func TestSpecRollbackOnlyRemovesAddedPorts(t *testing.T) {
 func TestSpecPrunesStalePorts(t *testing.T) {
 	p := &profile.Profile{Name: "widget", Ports: []profile.Port{{Proto: "tcp", Port: 8443}}}
 	spec := GenerateSpec(p, "1")
-	if !strings.Contains(spec, `_desired=" tcp:8443 "`) || !strings.Contains(spec, "could not prune stale port") {
+	if !strings.Contains(spec, `case " tcp:8443 " in`) || !strings.Contains(spec, "could not prune stale port") {
 		t.Errorf("spec must reconcile/prune stale port mappings:\n%s", spec)
 	}
 }

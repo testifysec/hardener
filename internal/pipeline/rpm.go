@@ -71,30 +71,32 @@ func GenerateSpec(p *profile.Profile, revision string) string {
 			vm.ShellQuote(exe), execType)
 	}
 	appPortType := policy.PortType(p.Name)
+	// desired: a leading+trailing-spaced set of proto:port, EMPTY when the
+	// profile declares no ports (so an upgrade to zero ports prunes everything).
+	desired := " "
+	for _, port := range p.Ports {
+		desired += fmt.Sprintf("%s:%d ", port.Proto, port.Port)
+	}
+	// reconcile runs BEFORE `semodule -i` (a mapping under <app>_port_t that the
+	// NEW module no longer defines would fail the load), and is emitted ALWAYS —
+	// including for an empty desired set — so a dropped port is removed rather
+	// than kept as undeclared bind privilege (review finding). Each removed
+	// mapping is recorded in _pruned so rollback can restore it.
+	reconcile := fmt.Sprintf(
+		"for _row in $(semanage port -l | awk '$1==\"%[1]s\"{for(i=3;i<=NF;i++){gsub(\",\",\"\",$i); print $2\":\"$i}}'); do "+
+			"case \"%[2]s\" in *\" $_row \"*) : ;; "+
+			"*) _pp=${_row%%%%:*}; _pn=${_row##*:}; "+
+			"if semanage port -d -t %[1]s -p \"$_pp\" \"$_pn\" 2>/dev/null; then _pruned=\"$_pruned $_row\"; "+
+			"else echo \"ERROR: could not prune stale port $_row from %[1]s — refusing to leave an undeclared bind privilege\" >&2; exit 1; fi ;; esac; done\n",
+		appPortType, desired)
+
 	var ports strings.Builder
 	var portsDel strings.Builder
-	if len(p.Ports) > 0 {
-		// (#6) Reconcile: prune any mapping under OUR port type that is NOT in
-		// the current profile. An upgrade that dropped a port would otherwise
-		// leave the stale mapping — undeclared bind privilege, or a dangling
-		// reference when the type disappears. Only ever touches <app>_port_t.
-		var desired strings.Builder
-		for _, port := range p.Ports {
-			fmt.Fprintf(&desired, " %s:%d", port.Proto, port.Port)
-		}
-		fmt.Fprintf(&ports,
-			"_desired=\"%[2]s \"\n"+
-				"for _row in $(semanage port -l | awk '$1==\"%[1]s\"{for(i=3;i<=NF;i++){gsub(\",\",\"\",$i); print $2\":\"$i}}'); do "+
-				"case \"$_desired\" in *\" $_row \"*) : ;; "+
-				"*) _pp=${_row%%%%:*}; _pn=${_row##*:}; semanage port -d -t %[1]s -p \"$_pp\" \"$_pn\" 2>/dev/null || { echo \"ERROR: could not prune stale port $_row from %[1]s — refusing to leave an undeclared bind privilege\" >&2; exit 1; } ;; esac; done\n",
-			appPortType, desired.String())
-	}
 	for _, port := range p.Ports {
-		// (#5) Add + verify, and RECORD only the ports we actually added
-		// (_added). Rollback then removes exactly this transaction's additions
-		// and never a pre-existing mapping owned by another service (-t is not an
-		// ownership guard). Still fail CLOSED if the port cannot land under our
-		// type. proto/port are validated at manifest load — safe to interpolate.
+		// Add + verify, RECORDING only the ports we actually added (_added), so
+		// rollback removes exactly this transaction's additions and never a
+		// pre-existing mapping owned by another service. Fail CLOSED if the port
+		// cannot land under our type. proto/port validated at load.
 		fmt.Fprintf(&ports,
 			"if semanage port -a -t %[1]s -p %[2]s %[3]d 2>/dev/null; then _added=\"$_added %[2]s:%[3]d\"; "+
 				"elif ! semanage port -l | awk -v t=%[1]s -v p=%[2]s '$1==t && $2==p' | grep -qw %[3]d; then "+
@@ -149,6 +151,7 @@ install -D -m 0644 %%{SOURCE1} %%{buildroot}%%{_datadir}/selinux/hardener/%[1]s.
 _op=$1
 _ok=0
 _added=""
+_pruned=""
 # Snapshot the currently-installed module before replacing it (upgrade only).
 # Best-effort: if extraction is unavailable, _snap stays empty and we keep the
 # loaded module rather than leaving the service unconfined.
@@ -159,23 +162,27 @@ if [ "$_op" != 1 ]; then
 fi
 _rollback() {
     [ "$_ok" = 1 ] && return 0
-    # Remove ONLY the port mappings THIS transaction added (tracked in _added),
-    # never a pre-existing mapping owned by another service (review finding).
+    # Remove ONLY the port mappings THIS transaction added (while our type still
+    # exists), never a pre-existing mapping owned by another service.
     for _row in $_added; do _rp=${_row%%%%:*}; _rn=${_row##*:}; semanage port -d -t %[7]s -p "$_rp" "$_rn" 2>/dev/null || :; done
     if [ "$_op" = 1 ]; then
         # Fresh install: remove the module, then restore base file labels.
         semodule -r %[1]s 2>/dev/null || :
 %[6]s
     elif [ -n "$_snap" ]; then
-        # Upgrade failure: reinstall the previous module and re-apply its labels,
-        # so the prior working policy is back in place (review finding).
+        # Upgrade failure: reinstall the previous module, re-apply its labels, and
+        # RESTORE the port mappings this transaction pruned — the prior working
+        # policy is fully back in place (review finding).
         ( cd "$_snap" && { semodule -i %[1]s.cil || semodule -i %[1]s.pp; } ) 2>/dev/null || :
 %[6]s
+        for _row in $_pruned; do _rp=${_row%%%%:*}; _rn=${_row##*:}; semanage port -a -t %[7]s -p "$_rp" "$_rn" 2>/dev/null || :; done
     fi
     # (Upgrade with no snapshot: keep the loaded module — never leave none.)
 }
 trap _rollback EXIT
-if ! semodule -i %%{_datadir}/selinux/packages/%[1]s.pp; then
+# Reconcile ports BEFORE loading the new module (a mapping to a type the new
+# module may not define would fail the load).
+%[8]sif ! semodule -i %%{_datadir}/selinux/packages/%[1]s.pp; then
     echo "ERROR: semodule failed to load the %[1]s policy module; the application is NOT confined" >&2
     exit 1
 fi
@@ -192,5 +199,5 @@ fi
 %%files
 %%{_datadir}/selinux/packages/%[1]s.pp
 %%{_datadir}/selinux/hardener/%[1]s.fc
-`, app, relabel.String(), ports.String(), portsDel.String(), revision, restore.String(), appPortType)
+`, app, relabel.String(), ports.String(), portsDel.String(), revision, restore.String(), appPortType, reconcile)
 }

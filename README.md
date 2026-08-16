@@ -169,7 +169,9 @@ and platform storage, wrap the run with CI/Lock instead — the two compose:
 ```bash
 cilock run --step confine --workload manual -o envelope.json -- \
   hardener run --vm selinux-verifier --out reports targets/app.yaml
-``` Note the semantics the fail
+```
+
+Note the semantics the fail
 case demonstrates: a second-party artifact can pass *enforcement*
 verification (the RPM builds) while the attestation records `"verdict":
 "fail"` on the supplier contract — the artifact exists, and the deploy gate

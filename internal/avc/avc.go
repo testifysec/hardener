@@ -152,11 +152,16 @@ func ParseLog(log string) []Denial {
 // allow rules that lose their path are re-collapsed by (source,target,class)
 // downstream (normalizeRules), so nothing over-broadens.
 func Merge(ds []Denial) []Denial {
-	type key struct{ s, t, c, p, i string }
+	type key struct {
+		s, t, c, p, i string
+		src           int // source port — two name_bind denials on different
+		// ports share a *_port_t type/class and would otherwise collapse to the
+		// first port, dropping the rest (review finding).
+	}
 	idx := map[key]int{}
 	var out []Denial
 	for _, d := range ds {
-		k := key{d.SourceType, d.TargetType, d.Class, d.Path, d.Ino}
+		k := key{d.SourceType, d.TargetType, d.Class, d.Path, d.Ino, d.Src}
 		if i, ok := idx[k]; ok {
 			out[i].Perms = unionSorted(out[i].Perms, d.Perms)
 			continue

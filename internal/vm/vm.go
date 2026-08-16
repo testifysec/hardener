@@ -2,6 +2,7 @@
 package vm
 
 import (
+	"context"
 	"fmt"
 	"os/exec"
 	"strings"
@@ -28,19 +29,14 @@ func (l *Lima) Run(script string) (string, error) {
 	if timeout == 0 {
 		timeout = 10 * time.Minute
 	}
-	cmd := exec.Command("limactl", "shell", l.Instance, "--", "bash", "-c", script)
-	done := make(chan struct{})
-	var out []byte
-	var err error
-	go func() {
-		out, err = cmd.CombinedOutput()
-		close(done)
-	}()
-	select {
-	case <-done:
-	case <-time.After(timeout):
-		_ = cmd.Process.Kill()
-		<-done
+	// CommandContext handles the kill on timeout itself — the previous manual
+	// goroutine + cmd.Process.Kill() panicked when the deadline fired before
+	// CombinedOutput had started the process (Process still nil), especially
+	// with a small timeout (review finding).
+	ctx, cancel := context.WithTimeout(context.Background(), timeout)
+	defer cancel()
+	out, err := exec.CommandContext(ctx, "limactl", "shell", l.Instance, "--", "bash", "-c", script).CombinedOutput()
+	if ctx.Err() == context.DeadlineExceeded {
 		return string(out), fmt.Errorf("timeout after %s", timeout)
 	}
 	if err != nil {

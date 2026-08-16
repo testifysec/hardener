@@ -3,6 +3,7 @@ package vm
 import (
 	"strings"
 	"testing"
+	"time"
 )
 
 // Content containing the old fixed heredoc delimiter must NOT be able to
@@ -30,5 +31,15 @@ func TestWriteFileScriptQuotesPath(t *testing.T) {
 	script := writeFileScript("/etc/app/x", "x")
 	if !strings.Contains(script, `'/etc/app/x'`) {
 		t.Errorf("path not single-quoted:\n%s", script)
+	}
+}
+
+// Round 23: a tiny/expired timeout must return an error, never panic — the old
+// manual goroutine + cmd.Process.Kill() panicked when the deadline fired before
+// the process started (Process still nil).
+func TestSSHTinyTimeoutNoPanic(t *testing.T) {
+	s := &SSH{Target: "nobody@203.0.113.1", Timeout: time.Nanosecond}
+	if _, err := s.Run("echo hi"); err == nil {
+		t.Error("a 1ns timeout (or missing ssh) must return an error, not succeed")
 	}
 }
