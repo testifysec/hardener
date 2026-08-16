@@ -17,6 +17,7 @@ import (
 	"path/filepath"
 	"regexp"
 	"sort"
+	"strings"
 
 	"github.com/testifysec/hardener/internal/pipeline"
 	"github.com/testifysec/hardener/internal/policy"
@@ -296,6 +297,12 @@ func failureOf(res *pipeline.Result) string {
 		return res.FailureReason
 	case res.ConformanceFatal != "":
 		return res.ConformanceFatal
+	case len(res.ConformanceUndecl) > 0 && (res.Party == "second" || res.Party == "first"):
+		// Defense in depth against an inconsistent result: undeclared behavior is
+		// fatal for a first/second-party artifact, so fail closed on the
+		// structured ConformanceUndecl data even if the fatal-summary string was
+		// never set (review finding — the two could disagree and pass).
+		return "undeclared behavior for a " + res.Party + "-party artifact: " + strings.Join(res.ConformanceUndecl, ", ")
 	case !res.DomainOK:
 		return "process does not run in the generated domain"
 	case !res.ExerciseOK:

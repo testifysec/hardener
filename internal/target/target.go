@@ -77,6 +77,45 @@ func isBroadSystemRoot(root string) bool {
 	return root == "" || broadSystemRoots[root]
 }
 
+// pathTiesToApp reports whether some component of root shares a meaningful
+// prefix with the app name — the positive-ownership signal for a path claim.
+func pathTiesToApp(root, appName string) bool {
+	app := normPath(policy.SafeName(appName))
+	need := 4
+	if len(app) < need {
+		need = len(app)
+	}
+	if need == 0 {
+		return false
+	}
+	for _, seg := range strings.Split(root, "/") {
+		if seg == "" {
+			continue
+		}
+		if commonPrefixLen(normPath(seg), app) >= need {
+			return true
+		}
+	}
+	return false
+}
+
+func commonPrefixLen(a, b string) int {
+	n := 0
+	for n < len(a) && n < len(b) && a[n] == b[n] {
+		n++
+	}
+	return n
+}
+
+// normPath lowercases and maps separators to underscores so path components
+// compare against the SafeName-normalized app name.
+func normPath(s string) string {
+	s = strings.ToLower(s)
+	s = strings.ReplaceAll(s, "-", "_")
+	s = strings.ReplaceAll(s, ".", "_")
+	return s
+}
+
 // Load reads and validates a target manifest.
 func Load(path string) (*Target, error) {
 	raw, err := os.ReadFile(path)
@@ -134,8 +173,23 @@ func Load(path string) (*Target, error) {
 		// the customer filesystem — and exact collision detection does not catch
 		// overlapping base-policy patterns (review finding). Reject any claim
 		// whose literal root is a bare system directory.
-		if root := literalRoot(pa.Path); isBroadSystemRoot(root) {
+		// A newline or control byte in a path lets a manifest inject additional
+		// file-context records (each fc line is newline-delimited) — reject them.
+		if strings.ContainsAny(pa.Path, "\n\r\x00") {
+			return nil, fmt.Errorf("%s: paths[%d]: path contains a newline or control character (file-context injection)", path, i)
+		}
+		root := literalRoot(pa.Path)
+		if isBroadSystemRoot(root) {
 			return nil, fmt.Errorf("%s: paths[%d] (%s): root %q is a broad system tree; declare a bounded, app-specific path", path, i, pa.Path, root)
+		}
+		// A path must be POSITIVELY app-owned, or a manifest could claim an
+		// unrelated system file (/etc/passwd, /usr/lib64/libc.so.6) and have
+		// %post restorecon relabel it (review finding). Ownership: some literal
+		// component shares a meaningful prefix with the app name — loose enough
+		// for vendor dirs (splunkforwarder for splunk-uf, plexmediaserver for
+		// plex) yet rejecting unrelated system paths.
+		if !pathTiesToApp(root, t.Name) {
+			return nil, fmt.Errorf("%s: paths[%d] (%s): no path component ties to app %q — hardener will not relabel an unrelated system path; declare an app-owned location", path, i, pa.Path, t.Name)
 		}
 	}
 	// Port proto/number are interpolated into root %post/%postun `semanage port`

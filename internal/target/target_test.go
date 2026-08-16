@@ -137,3 +137,43 @@ paths:
 		t.Errorf("error should mention exec: %v", err)
 	}
 }
+
+const pathManifest = `name: widget
+install: "true"
+unit: widget.service
+exercise: "true"
+executables:
+  - /opt/widget/bin/widgetd
+paths:
+  - { path: %q, kind: conf }
+`
+
+// Round 24 (#1): a path must be positively app-owned (a literal root component
+// ties to the app name) and free of newline/control bytes — otherwise a
+// manifest could have %post restorecon relabel an unrelated system file, or
+// inject extra file-context records via an embedded newline.
+func TestLoadRejectsUnownedAndInjectionPaths(t *testing.T) {
+	bad := []string{
+		"/etc/passwd",                             // unrelated system file, not app-owned
+		"/usr/lib64/libc.so.6",                    // shared library, not app-owned
+		"/var/lib/other(/.*)?",                    // app-specific shape but ties to "other"
+		"/etc/widget\n/etc/shadow gen_context(x)", // newline injection
+		"/etc/widget\x00evil",                     // NUL byte
+	}
+	for _, p := range bad {
+		if _, err := Load(write(t, fmt.Sprintf(pathManifest, p))); err == nil {
+			t.Errorf("path %q must be rejected", p)
+		}
+	}
+	// App-owned, bounded paths still load — including a vendor dir whose name
+	// merely shares a prefix with the app (splunkforwarder for a splunk app).
+	for _, ok := range []string{
+		"/etc/widget(/.*)?",
+		"/var/lib/widget(/.*)?",
+		"/opt/widgetd/data(/.*)?",
+	} {
+		if _, err := Load(write(t, fmt.Sprintf(pathManifest, ok))); err != nil {
+			t.Errorf("app-owned path %q must load: %v", ok, err)
+		}
+	}
+}
