@@ -63,6 +63,12 @@ type Result struct {
 	// installed in the verifier — the exact bytes exercised, bound into the
 	// verdict attestation.
 	EntrypointDigests map[string]string
+	// EntrypointPaths is the resolved+validated entrypoint set the pipeline
+	// INTENDED to bind (symlinks resolved, ownership-checked, ExecStart injected).
+	// The verdict cross-checks EntrypointDigests against it so a passing verdict
+	// must bind EVERY resolved entrypoint and no unrelated path — recorded
+	// independently of the digest loop so a future omission there is caught.
+	EntrypointPaths []string
 	// Conformance is filled by the caller per party class; rendered in the report.
 	Party             string
 	ConformanceUndecl []string
@@ -408,6 +414,10 @@ func Run(r vm.Runner, t *target.Target, opts Options) *Result {
 		}
 	}
 	p.Executables = resolved
+	// Record the resolved set the verdict must see bound — captured here,
+	// independently of the digest loop below, so a future change that hashes a
+	// narrower set than was resolved is caught as a mismatch at verdict time.
+	res.EntrypointPaths = append([]string(nil), resolved...)
 	// Fingerprint EVERY resolved entrypoint as installed — bound into the
 	// verdict. This must fail closed: an execute-only or root-owned binary that
 	// `sha256sum` (unprivileged) cannot read used to be silently skipped, so a
@@ -810,7 +820,9 @@ func Run(r vm.Runner, t *target.Target, opts Options) *Result {
 	// 6. Package as RPM. Packaging failures also fail closed: a passing run
 	// with no subject artifact is an attestation about nothing.
 	if res.EnforceOK {
-		rpm, err := buildRPM(r, p, opts.Revision)
+		// Pass the VERIFIED, enforced policy text so buildRPM packages the exact
+		// immutable bytes (recompiled fresh), not the swappable staged .pp.
+		rpm, err := buildRPM(r, p, opts.Revision, res.FinalTE, res.FinalFC)
 		if err != nil {
 			return fail("rpmbuild", err)
 		}

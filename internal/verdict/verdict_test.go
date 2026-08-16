@@ -25,6 +25,7 @@ func passingResult() *pipeline.Result {
 		}},
 		EnforceOK: true, DomainOK: true, ExerciseOK: true, FlagsAccepted: true,
 		EntrypointDigests: map[string]string{"/usr/sbin/widgetd": "abababababababababababababababababababababababababababababababab"},
+		EntrypointPaths:   []string{"/usr/sbin/widgetd"},
 		StaticChecks:      []pipeline.StaticCheck{{Name: "no shadow_t read/write", Passed: true}},
 		// RPMPath is deliberately empty here: RPM-subject binding is exercised
 		// where it matters (TestBuildStatementShape passes the RPM via extra,

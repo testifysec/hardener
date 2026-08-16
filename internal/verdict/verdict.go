@@ -256,18 +256,30 @@ func BuildOrErr(res *pipeline.Result, env Env, extra []Subject) (Statement, erro
 	// or the entrypoint bytes — not only the .te/.fc policy text. Otherwise
 	// the attestation certifies a policy with no link to what gets installed.
 	if p.Verdict != "fail" {
-		// The exercised APPLICATION bytes must be bound: the entrypoint digests
-		// captured on the verifier for every declared executable. The built RPM
-		// is the generated SELinux POLICY package (compiled .pp + %post), NOT the
-		// application — so it cannot substitute here. Accepting an RPM with no
-		// entrypoint digests (the old `|| res.RPMPath != ""`) bound the verdict to
-		// the policy alone, letting a CHANGED application artifact at the same path
-		// reuse the attestation (review finding). EntrypointDigests is populated
-		// for every declared executable before observation and fails closed if any
-		// cannot be hashed, so a genuinely passing run always has it. The RPM, when
-		// produced, is ADDITIONALLY required as a subject by the block below.
-		if len(res.EntrypointDigests) == 0 {
+		// The exercised APPLICATION bytes must be bound: a digest for EVERY
+		// resolved entrypoint, and no unrelated path. The built RPM is the
+		// generated SELinux POLICY package (compiled .pp + %post), NOT the
+		// application — so it cannot substitute (the old `|| res.RPMPath != ""`
+		// bound the verdict to the policy alone, letting a CHANGED application
+		// artifact reuse the attestation). A mere non-empty check is also
+		// insufficient: an OMITTED entrypoint could change without invalidating
+		// the signature (review finding). Validate the digest keys against the
+		// resolved entrypoint set the pipeline recorded: every one present, none
+		// extra. The RPM, when produced, is ADDITIONALLY required below.
+		if len(res.EntrypointPaths) == 0 || len(res.EntrypointDigests) == 0 {
 			return Statement{}, fmt.Errorf("passing verdict has no verified entrypoint digests — the attestation would bind the generated policy package but not the application bytes exercised; refusing")
+		}
+		expected := make(map[string]bool, len(res.EntrypointPaths))
+		for _, e := range res.EntrypointPaths {
+			expected[e] = true
+			if res.EntrypointDigests[e] == "" {
+				return Statement{}, fmt.Errorf("passing verdict is missing a bound digest for resolved entrypoint %q — every exercised entrypoint must be bound; refusing", e)
+			}
+		}
+		for k := range res.EntrypointDigests {
+			if !expected[k] {
+				return Statement{}, fmt.Errorf("passing verdict binds an entrypoint digest for %q, which is not in the resolved entrypoint set — refusing to attest an unrelated path", k)
+			}
 		}
 		// Whenever an RPM was actually produced, it MUST be among the subjects.
 		// The distributed package (compiled policy + %post scriptlets) is what
