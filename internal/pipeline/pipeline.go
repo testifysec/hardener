@@ -134,6 +134,32 @@ func Run(r vm.Runner, t *target.Target, opts Options) *Result {
 		if !moduleInstalled {
 			return
 		}
+		// NEVER tear down confinement around a LIVE process. Cleanup removes the
+		// permissive entry, ports, module, and labels; doing that while the
+		// confined service is still running would leave a live process UNCONFINED
+		// and free to keep generating denials or contaminate later verification
+		// (review finding). Force-kill and re-verify first; if the unit still
+		// cannot be proven dead, PRESERVE everything (the module keeps it confined)
+		// and leave a loud note for manual cleanup rather than un-confine it.
+		if t.Unit != "" {
+			quiescent := func() bool {
+				out, _ := r.Run(fmt.Sprintf("systemctl is-active %s", t.Unit))
+				switch strings.TrimSpace(out) {
+				case "inactive", "failed", "":
+					return true // dead (or unknown on a stubbed env)
+				default:
+					return false // active/activating/deactivating/reloading → still live
+				}
+			}
+			if !quiescent() {
+				_, _ = r.Run(fmt.Sprintf("sudo systemctl kill -s SIGKILL %s 2>/dev/null; true", t.Unit))
+				_, _ = r.Run(fmt.Sprintf("sudo systemctl stop %s 2>/dev/null; true", t.Unit))
+				if !quiescent() {
+					opts.Log("[%s] WARNING: unit %s is still running after SIGKILL — PRESERVING the SELinux module/ports so the live process stays confined; manual cleanup required", t.Name, t.Unit)
+					return
+				}
+			}
+		}
 		appName := policy.SafeName(p.Name)
 		pt := policy.PortType(p.Name)
 		// ORDER MATTERS. Clear the permissive entry and DELETE the port mappings

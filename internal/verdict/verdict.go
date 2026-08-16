@@ -256,15 +256,18 @@ func BuildOrErr(res *pipeline.Result, env Env, extra []Subject) (Statement, erro
 	// or the entrypoint bytes — not only the .te/.fc policy text. Otherwise
 	// the attestation certifies a policy with no link to what gets installed.
 	if p.Verdict != "fail" {
-		// The artifact must be AUTHORITATIVE — the exercised entrypoint bytes or
-		// the built RPM — not merely "some caller-provided extra subject". Keying
-		// off len(extra) let an unrelated subject with a valid digest satisfy the
-		// requirement and produce a passing attestation for a policy bound to
-		// nothing that was exercised (review finding). The RPM, when produced, is
-		// itself validated by the RPMPath block below.
-		hasArtifact := len(res.EntrypointDigests) > 0 || res.RPMPath != ""
-		if !hasArtifact {
-			return Statement{}, fmt.Errorf("passing verdict has no authoritative artifact subject (built RPM or exercised entrypoint bytes); refusing to attest a policy bound to nothing exercised")
+		// The exercised APPLICATION bytes must be bound: the entrypoint digests
+		// captured on the verifier for every declared executable. The built RPM
+		// is the generated SELinux POLICY package (compiled .pp + %post), NOT the
+		// application — so it cannot substitute here. Accepting an RPM with no
+		// entrypoint digests (the old `|| res.RPMPath != ""`) bound the verdict to
+		// the policy alone, letting a CHANGED application artifact at the same path
+		// reuse the attestation (review finding). EntrypointDigests is populated
+		// for every declared executable before observation and fails closed if any
+		// cannot be hashed, so a genuinely passing run always has it. The RPM, when
+		// produced, is ADDITIONALLY required as a subject by the block below.
+		if len(res.EntrypointDigests) == 0 {
+			return Statement{}, fmt.Errorf("passing verdict has no verified entrypoint digests — the attestation would bind the generated policy package but not the application bytes exercised; refusing")
 		}
 		// Whenever an RPM was actually produced, it MUST be among the subjects.
 		// The distributed package (compiled policy + %post scriptlets) is what

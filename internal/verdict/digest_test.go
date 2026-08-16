@@ -266,3 +266,24 @@ func TestVerdictRejectsUnrelatedAndDuplicateExtras(t *testing.T) {
 		t.Error("duplicate subject names must be rejected")
 	}
 }
+
+// The built RPM is the generated SELinux POLICY package, not the application, so
+// binding ONLY the RPM leaves the app bytes uncertified — a changed application
+// artifact at the same path could reuse the verdict. A passing verdict must bind
+// the exercised entrypoint digests even when a correctly-bound RPM is present.
+// (review finding — round 53)
+func TestPassingVerdictRequiresEntrypointDigestsEvenWithRPM(t *testing.T) {
+	r := passingResult()
+	r.RPMPath = "/home/u/rpmbuild/RPMS/noarch/widget-selinux-1.0.0-1.el9.noarch.rpm"
+	r.RPMSHA256 = goodSHA
+	r.EntrypointDigests = nil // policy package present, but NO application bytes bound
+	rpmSubject := []Subject{{Name: "widget-selinux-1.0.0-1.el9.noarch.rpm", SHA256: goodSHA}}
+	if _, err := BuildOrErr(r, Env{}, rpmSubject); err == nil {
+		t.Fatal("a pass bound only to the policy RPM (no entrypoint digests) must be rejected")
+	}
+	// Restoring the entrypoint digests (with the RPM still bound) succeeds.
+	r.EntrypointDigests = map[string]string{"/usr/sbin/widgetd": goodSHA}
+	if _, err := BuildOrErr(r, Env{}, rpmSubject); err != nil {
+		t.Fatalf("app entrypoints + bound RPM must be accepted: %v", err)
+	}
+}
