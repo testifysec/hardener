@@ -51,13 +51,18 @@ func TestGenerateSpec(t *testing.T) {
 		Paths:       []profile.PathAccess{{Path: "/var/lib/widget(/.*)?", Kind: "var_lib"}},
 		Ports:       []profile.Port{{Proto: "tcp", Port: 8443}},
 	}
-	spec := GenerateSpec(p)
+	spec := GenerateSpec(p, "20260101000000")
 	for _, want := range []string{
 		"Name:           widget-selinux",
 		"semodule -i %{_datadir}/selinux/packages/widget.pp",
-		`restorecon -RF "/var/lib/widget"`,
+		`restorecon -RF -- '/var/lib/widget'`,
 		"semanage port -a -t widget_port_t -p tcp 8443",
 		"semodule -r widget",
+		// Release carries the monotonic revision (finding: static NEVRA).
+		"Release:        1.20260101000000",
+		// Entrypoint type is verified after restorecon (finding: restorecon
+		// success != correct type).
+		"not widget_exec_t",
 	} {
 		if !strings.Contains(spec, want) {
 			t.Errorf("spec missing %q", want)

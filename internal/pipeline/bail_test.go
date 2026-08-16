@@ -65,6 +65,7 @@ func TestBailsWhenPermissiveExerciseFailsWithNoDenials(t *testing.T) {
 			"getenforce":        "Enforcing\nactive",
 			"stat -c '%s %i'":   "0 4242",
 			"systemctl restart": "",
+			"sha256sum":         "abababababababababababababababababababababababababababababababab  /opt/widget/bin/widgetd",
 		},
 		failOn: []string{"EXERCISE_MARKER"}, // the exercise script fails
 	}

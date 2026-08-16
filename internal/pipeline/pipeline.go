@@ -23,6 +23,10 @@ type Options struct {
 	MaxRounds     int  // permissive observe/refine rounds (default 5)
 	AcceptFlagged bool // apply flagged rules (still reported for review)
 	Log           func(format string, args ...any)
+	// Revision is a monotonically increasing build stamp baked into the policy
+	// RPM's Release, so two builds with different content never share a NEVRA
+	// (the CLI sets it to a UTC timestamp). Empty falls back to "0".
+	Revision string
 }
 
 // Result is the full record of one target's run.
@@ -184,7 +188,7 @@ func Run(r vm.Runner, t *target.Target, opts Options) *Result {
 	seen := map[string]bool{}
 	var resolved []string
 	for _, exe := range p.Executables {
-		out, err := r.Run(fmt.Sprintf("readlink -f %q", exe))
+		out, err := r.Run(fmt.Sprintf("readlink -f -- %s", vm.ShellQuote(exe)))
 		real := strings.TrimSpace(out)
 		if err != nil || real == "" {
 			real = exe
@@ -209,14 +213,24 @@ func Run(r vm.Runner, t *target.Target, opts Options) *Result {
 		}
 	}
 	p.Executables = resolved
-	// Fingerprint the resolved entrypoints as installed — bound into the verdict.
+	// Fingerprint EVERY resolved entrypoint as installed — bound into the
+	// verdict. This must fail closed: an execute-only or root-owned binary that
+	// `sha256sum` (unprivileged) cannot read used to be silently skipped, so a
+	// binary could run under systemd while the passing verdict bound no digest
+	// for it (review finding). Read with sudo and require a valid 64-hex digest
+	// for each; a missing one fails the run. Paths are single-quoted (not %q,
+	// whose double quotes still expand $()/backticks under passwordless sudo).
 	res.EntrypointDigests = map[string]string{}
 	for _, exe := range p.Executables {
-		if out, err := r.Run(fmt.Sprintf("sha256sum %q 2>/dev/null", exe)); err == nil {
-			if fs := strings.Fields(out); len(fs) > 0 && len(fs[0]) == 64 {
-				res.EntrypointDigests[exe] = fs[0]
-			}
+		out, err := r.Run(fmt.Sprintf("sudo sha256sum -- %s", vm.ShellQuote(exe)))
+		if err != nil {
+			return fail("entrypoint-digest", fmt.Errorf("hashing entrypoint %s: %w", exe, err))
 		}
+		fs := strings.Fields(out)
+		if len(fs) == 0 || len(fs[0]) != 64 {
+			return fail("entrypoint-digest", fmt.Errorf("entrypoint %s produced no valid sha256 (got %q)", exe, strings.TrimSpace(out)))
+		}
+		res.EntrypointDigests[exe] = fs[0]
 	}
 
 	// A unit with NoNewPrivileges=yes restricts SELinux to bounded transitions,
@@ -235,7 +249,7 @@ func Run(r vm.Runner, t *target.Target, opts Options) *Result {
 	// coverage-gap report.
 	allSyms := map[string]bool{}
 	for _, exe := range p.Executables {
-		out, err := r.Run(fmt.Sprintf("readelf --dyn-syms -W %q 2>/dev/null; true", exe))
+		out, err := r.Run(fmt.Sprintf("readelf --dyn-syms -W -- %s 2>/dev/null; true", vm.ShellQuote(exe)))
 		if err != nil {
 			continue
 		}
@@ -302,6 +316,26 @@ func Run(r vm.Runner, t *target.Target, opts Options) *Result {
 	}
 
 	// 3. Synthesize and install initial policy, then observe/refine loop.
+	//
+	// The observe rounds put the domain on the persistent verifier's PERMISSIVE
+	// list. The success path removes it before the enforcing check (below), but
+	// any early error return in between would otherwise leave the domain
+	// permissive for every future run on this box (review finding). Guarantee
+	// removal on all paths with a deferred, idempotent cleanup; the success path
+	// still calls it explicitly (and surfaces a removal failure) before enforcing.
+	permissiveCleared := false
+	clearPermissive := func() error {
+		if permissiveCleared {
+			return nil
+		}
+		_, err := r.Run(fmt.Sprintf("sudo semanage permissive -d %s", dom))
+		if err == nil {
+			permissiveCleared = true
+		}
+		return err
+	}
+	defer func() { _ = clearPermissive() }()
+
 	var extraRules []policy.AllowRule
 	prevRelabels := ""
 	for round := 1; round <= opts.MaxRounds; round++ {
@@ -342,7 +376,7 @@ func Run(r vm.Runner, t *target.Target, opts Options) *Result {
 		}
 		newRules := mergeNewRules(&extraRules, rules)
 		for _, rl := range ref.Relabels {
-			if _, err := r.Run(fmt.Sprintf("sudo restorecon -F %q", rl.Path)); err != nil {
+			if _, err := r.Run(fmt.Sprintf("sudo restorecon -F -- %s", vm.ShellQuote(rl.Path))); err != nil {
 				opts.Log("[%s] restorecon %s failed: %v", t.Name, rl.Path, err)
 			}
 		}
@@ -395,7 +429,7 @@ func Run(r vm.Runner, t *target.Target, opts Options) *Result {
 	// ticks, lazy caches) can surface only now, so residual denials feed one
 	// more refinement round — bounded, and only while it makes progress.
 	opts.Log("[%s] switching domain to enforcing and re-verifying", t.Name)
-	if _, err := r.Run(fmt.Sprintf("sudo semanage permissive -d %s", dom)); err != nil {
+	if err := clearPermissive(); err != nil {
 		return fail("un-permissive", err)
 	}
 	for attempt := 1; ; attempt++ {
@@ -424,7 +458,7 @@ func Run(r vm.Runner, t *target.Target, opts Options) *Result {
 		newRules := mergeNewRules(&extraRules, rules)
 		res.Relabels = append(res.Relabels, ref.Relabels...)
 		for _, rl := range ref.Relabels {
-			_, _ = r.Run(fmt.Sprintf("sudo restorecon -F %q", rl.Path))
+			_, _ = r.Run(fmt.Sprintf("sudo restorecon -F -- %s", vm.ShellQuote(rl.Path)))
 		}
 		if newRules == 0 && len(ref.Relabels) == 0 {
 			break // genuinely nothing new — neither a rule nor a relabel
@@ -468,7 +502,7 @@ func Run(r vm.Runner, t *target.Target, opts Options) *Result {
 	// binary after the initial capture, leaving the verdict bound to bytes
 	// that were never actually verified under enforcement (review finding).
 	for exe, want := range res.EntrypointDigests {
-		out, err := r.Run(fmt.Sprintf("sha256sum %q 2>/dev/null", exe))
+		out, err := r.Run(fmt.Sprintf("sudo sha256sum -- %s", vm.ShellQuote(exe)))
 		fs := strings.Fields(out)
 		if err != nil || len(fs) == 0 || fs[0] != want {
 			return fail("entrypoint-mutated", fmt.Errorf(
@@ -492,12 +526,12 @@ func Run(r vm.Runner, t *target.Target, opts Options) *Result {
 	// 6. Package as RPM. Packaging failures also fail closed: a passing run
 	// with no subject artifact is an attestation about nothing.
 	if res.EnforceOK {
-		rpm, err := buildRPM(r, p)
+		rpm, err := buildRPM(r, p, opts.Revision)
 		if err != nil {
 			return fail("rpmbuild", err)
 		}
 		res.RPMPath = rpm
-		out, err := r.Run(fmt.Sprintf("sha256sum %q", rpm))
+		out, err := r.Run(fmt.Sprintf("sha256sum -- %s", vm.ShellQuote(rpm)))
 		fields := strings.Fields(out)
 		if err != nil || len(fields) == 0 {
 			return fail("rpm-digest", fmt.Errorf("sha256sum %s: %v", rpm, err))
@@ -640,15 +674,15 @@ func installPolicy(r vm.Runner, p *profile.Profile, te, fc string) error {
 	}
 	reconcileStalePorts(r, p)
 	script := fmt.Sprintf(`set -e
-cd %q
+cd %s
 sudo make -f /usr/share/selinux/devel/Makefile %s.pp
 sudo semodule -i %s.pp
-`, dir, app, app)
+`, vm.ShellQuote(dir), app, app)
 	if _, err := r.Run(script); err != nil {
 		return err
 	}
 	for _, root := range RelabelRoots(p) {
-		if _, err := r.Run(fmt.Sprintf("sudo restorecon -RF %q 2>/dev/null || true", root)); err != nil {
+		if _, err := r.Run(fmt.Sprintf("sudo restorecon -RF -- %s 2>/dev/null || true", vm.ShellQuote(root))); err != nil {
 			return err
 		}
 	}

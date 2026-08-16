@@ -13,6 +13,7 @@ import (
 	"os"
 	"path/filepath"
 	"strings"
+	"time"
 
 	"github.com/testifysec/hardener/internal/archivista"
 	"github.com/testifysec/hardener/internal/conformance"
@@ -150,6 +151,9 @@ func main() {
 			MaxRounds:     *rounds,
 			AcceptFlagged: *acceptFlagged,
 			Log:           log.Printf,
+			// UTC timestamp → a monotonic RPM Release, so rebuilding a policy
+			// with changed content never collides with the prior NEVRA.
+			Revision: time.Now().UTC().Format("20060102150405"),
 		})
 		checkConformance(res, t, path, *updateBaseline, log.Printf)
 		report := pipeline.RenderReport(res)

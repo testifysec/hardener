@@ -123,3 +123,27 @@ func TestStatementIsDeterministic(t *testing.T) {
 		}
 	}
 }
+
+// Round 16: the verdict must DISCLOSE the unconditional base-interface grants
+// (shell/bin exec, /etc & /usr reads, cert access) as review-required — they
+// produce no AVCs, so a pass must not silently imply they were minimized.
+func TestVerdictDisclosesBaseGrants(t *testing.T) {
+	r := passingResult()
+	r.RPMPath = ""
+	st, err := BuildOrErr(r, Env{}, nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(st.Predicate.Coverage.BaseGrants) == 0 {
+		t.Error("verdict must disclose the unconditional base grants")
+	}
+	found := false
+	for _, g := range st.Predicate.Coverage.BaseGrants {
+		if g == "corecmd_exec_shell" {
+			found = true
+		}
+	}
+	if !found {
+		t.Errorf("base grants must include shell execution: %v", st.Predicate.Coverage.BaseGrants)
+	}
+}
