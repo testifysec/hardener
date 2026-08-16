@@ -159,6 +159,19 @@ func GenerateTE(p *profile.Profile) string {
 		fmt.Fprintf(&b, "manage_files_pattern(%s, %s_tmp_t, %s_tmp_t)\n", dom, app, app)
 		fmt.Fprintf(&b, "files_tmp_filetrans(%s, %s_tmp_t, { dir file })\n", dom, app)
 	}
+	// KindCache got the manage_* patterns above but NO type transition, unlike every
+	// sibling kind. /var/cache is var_t, and RPM install skips a root that does not
+	// exist yet, so an app that creates its own cache directory on first start had it
+	// labeled var_t instead of <app>_cache_t — denied, and unable to converge in the
+	// field where nobody can relabel it (review finding — round 72). /var/cache is
+	// var_t (verified on the verifier), so files_var_filetrans is the right interface.
+	// Use its NAME-based form, scoped to each declared cache root's leaf name, rather
+	// than claiming everything this domain creates in ANY var_t directory. Nested
+	// paths need no rule: a child created inside an <app>_cache_t directory already
+	// inherits that type by default.
+	for _, name := range cacheTransitionNames(p) {
+		fmt.Fprintf(&b, "files_var_filetrans(%s, %s_cache_t, { dir file }, \"%s\")\n", dom, app, name)
+	}
 
 	if len(p.Ports) > 0 {
 		b.WriteString("\n########################################\n# Network\n########################################\n")
@@ -223,6 +236,36 @@ func GenerateFC(p *profile.Profile) string {
 }
 
 // escapeFCPath escapes regex metacharacters in a literal path for file_contexts.
+// cacheTransitionNames returns the leaf directory name of each declared cache
+// path — the object name a name-based type transition keys on. The declared path
+// is a literal root optionally followed by a terminal (/.*)? (enforced by
+// target.Load), so trimming that suffix and taking the last element yields the
+// directory the app creates under /var/cache. Duplicates are collapsed, and a
+// name containing a quote or backslash is skipped rather than emitted into the
+// .te (it could not come from a valid manifest, but the policy text must never be
+// injectable).
+func cacheTransitionNames(p *profile.Profile) []string {
+	seen := map[string]bool{}
+	var out []string
+	for _, pa := range p.Paths {
+		if KindFromString(pa.Kind) != KindCache {
+			continue
+		}
+		root := strings.TrimSuffix(pa.Path, "(/.*)?")
+		root = strings.TrimRight(root, "/")
+		name := root
+		if i := strings.LastIndex(root, "/"); i >= 0 {
+			name = root[i+1:]
+		}
+		if name == "" || strings.ContainsAny(name, "\"\\") || seen[name] {
+			continue
+		}
+		seen[name] = true
+		out = append(out, name)
+	}
+	return out
+}
+
 func escapeFCPath(path string) string {
 	var b strings.Builder
 	for _, r := range path {
