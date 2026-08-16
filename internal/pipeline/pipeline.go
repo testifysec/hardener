@@ -135,7 +135,6 @@ func Run(r vm.Runner, t *target.Target, opts Options) *Result {
 			return
 		}
 		appName := policy.SafeName(p.Name)
-		pt := policy.PortType(p.Name)
 		// ORDER MATTERS. Clear the permissive entry and DELETE the port mappings
 		// FIRST — the port mappings reference the module's <app>_port_t type, so
 		// `semodule -r` fails while they exist and, with its error discarded, the
@@ -144,7 +143,10 @@ func Run(r vm.Runner, t *target.Target, opts Options) *Result {
 		// and restore labels last.
 		_, _ = r.Run(fmt.Sprintf("sudo semanage permissive -d %s 2>/dev/null || true", dom))
 		for _, port := range p.Ports {
-			_, _ = r.Run(fmt.Sprintf("sudo semanage port -d -t %s -p %s %d 2>/dev/null || true", pt, port.Proto, port.Port))
+			// `semanage port -d` does NOT accept -t (the type option is for add/
+			// modify) — with -t the delete errored and left the mapping, which then
+			// blocked `semodule -r` (review finding). Delete by proto/port only.
+			_, _ = r.Run(fmt.Sprintf("sudo semanage port -d -p %s %d 2>/dev/null || true", port.Proto, port.Port))
 		}
 		for attempt := 0; attempt < 2; attempt++ {
 			_, _ = r.Run(fmt.Sprintf("sudo semodule -r %s 2>/dev/null || true", appName))
@@ -978,7 +980,10 @@ func reconcileStalePorts(r vm.Runner, p *profile.Profile) error {
 			if current[proto+"/"+port] {
 				continue
 			}
-			if _, err := r.Run(fmt.Sprintf("sudo semanage port -d -t %s -p %s %s", pt, proto, port)); err != nil {
+			// The row was already selected as belonging to our type (f[0]==pt), and
+			// `semanage port -d` rejects -t — delete by proto/port only (review
+			// finding: -t made every delete error and leave the mapping behind).
+			if _, err := r.Run(fmt.Sprintf("sudo semanage port -d -p %s %s", proto, port)); err != nil {
 				return fmt.Errorf("could not delete stale port mapping %s/%s from %s: %w", proto, port, pt, err)
 			}
 		}

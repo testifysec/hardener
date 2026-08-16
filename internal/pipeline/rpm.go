@@ -114,7 +114,7 @@ func GenerateSpec(p *profile.Profile, revision string) string {
 			"for _row in $(printf '%%s\\n' \"$_portlist\" | awk '$1==\"%[1]s\"{for(i=3;i<=NF;i++){gsub(\",\",\"\",$i); print $2\":\"$i}}'); do "+
 			"case \"%[2]s\" in *\" $_row \"*) : ;; "+
 			"*) _pp=${_row%%%%:*}; _pn=${_row##*:}; "+
-			"if semanage port -d -t %[1]s -p \"$_pp\" \"$_pn\" 2>/dev/null; then _pruned=\"$_pruned $_row\"; "+
+			"if semanage port -d -p \"$_pp\" \"$_pn\" 2>/dev/null; then _pruned=\"$_pruned $_row\"; "+
 			"else echo \"ERROR: could not prune stale port $_row from %[1]s — refusing to leave an undeclared bind privilege\" >&2; exit 1; fi ;; esac; done\n",
 		appPortType, desired)
 
@@ -131,7 +131,10 @@ func GenerateSpec(p *profile.Profile, revision string) string {
 				"echo \"ERROR: port %[3]d/%[2]s could not be assigned to %[1]s (already claimed by another SELinux type?); refusing to leave %[1]s bound to an unintended port type\" >&2; exit 1; fi\n",
 			appPortType, port.Proto, port.Port)
 		// Full removal for %postun, observable (round-18 finding).
-		fmt.Fprintf(&portsDel, "semanage port -d -t %[1]s -p %[2]s %[3]d 2>/dev/null || echo \"warning: could not remove port %[3]d/%[2]s mapping for %[1]s\" >&2\n",
+		// `semanage port -d` rejects -t; delete by proto/port only, but ONLY after
+		// confirming the mapping still belongs to OUR type — so uninstall never
+		// removes a proto/port another service later claimed (review finding).
+		fmt.Fprintf(&portsDel, "if semanage port -l 2>/dev/null | awk -v t=%[1]s -v p=%[2]s '$1==t && $2==p' | grep -qw %[3]d; then semanage port -d -p %[2]s %[3]d 2>/dev/null || echo \"warning: could not remove port %[3]d/%[2]s mapping for %[1]s\" >&2; fi\n",
 			appPortType, port.Proto, port.Port)
 	}
 	// After the module is removed on uninstall, the app's files still carry the
@@ -249,7 +252,7 @@ _rollback() {
     [ "$_ok" = 1 ] && return 0
     # Remove ONLY the port mappings THIS transaction added (while our type still
     # exists), never a pre-existing mapping owned by another service.
-    for _row in $_added; do _rp=${_row%%%%:*}; _rn=${_row##*:}; semanage port -d -t %[7]s -p "$_rp" "$_rn" 2>/dev/null || :; done
+    for _row in $_added; do _rp=${_row%%%%:*}; _rn=${_row##*:}; semanage port -d -p "$_rp" "$_rn" 2>/dev/null || :; done
     if [ "$_op" = 1 ]; then
         # Fresh install: remove the module, then restore base file labels.
         semodule -r %[1]s 2>/dev/null || :
