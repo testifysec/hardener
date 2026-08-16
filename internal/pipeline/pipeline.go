@@ -193,7 +193,20 @@ func Run(r vm.Runner, t *target.Target, opts Options) *Result {
 	// that had a process ALLOW rule, missing a bare type declaration (review
 	// finding). Query the type DIRECTLY with seinfo, cross-check with sesearch,
 	// and fail closed only when NEITHER tool can run.
+	appMod := policy.SafeName(p.Name)
 	nameConflict := func() (bool, error) {
+		// A module named <app> may already exist that defines a DIFFERENTLY-named
+		// domain (a vendor `mysql` module defining mysqld_t). `semodule -i <app>.pp`
+		// replaces by MODULE NAME, so it would silently overwrite that module even
+		// though our <app>_t type check finds nothing — removing real confinement
+		// (review finding). Check the module list by name too.
+		if modlist, merr := r.Run("sudo semodule -l 2>/dev/null"); merr == nil {
+			for _, line := range strings.Split(modlist, "\n") {
+				if f := strings.Fields(line); len(f) > 0 && f[0] == appMod {
+					return true, nil // a module named <app> already exists → conflict
+				}
+			}
+		}
 		out, err := r.Run(fmt.Sprintf("seinfo -t %s 2>/dev/null", dom))
 		if err == nil && strings.Contains(out, dom) {
 			return true, nil // the type is defined → conflict

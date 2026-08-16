@@ -113,16 +113,17 @@ func pathTiesToApp(root, appName string) bool {
 		if seg == "" {
 			continue
 		}
-		if seg == app || strings.HasPrefix(seg, app+"_") {
-			return true
+		// A GENERIC component never proves ownership on its own — not even an EXACT
+		// match. An app literally named `services` must not claim /etc/services, and
+		// `system-widget` must not claim /etc/systemd/system via the "system"
+		// component (review finding). Any tie through a generic component requires
+		// the explicit owned: true override.
+		if genericPathComponents[seg] {
+			continue
 		}
-		// The "component is a prefix-token of the app name" direction (nats ↔
-		// nats_server) is legitimate only when the component is itself app-specific.
-		// A GENERIC parent directory ("system" in /etc/systemd/system) is a prefix
-		// of a compound app name like system-widget, which would bypass owned:true
-		// and relabel every local unit file (review finding). Generic components
-		// require the explicit ownership override.
-		if strings.HasPrefix(app, seg+"_") && !genericPathComponents[seg] {
+		// App-specific component: exact, app-name+suffix (emby ↔ emby_server), or
+		// the component is a prefix-token of a compound app name (nats ↔ nats_server).
+		if seg == app || strings.HasPrefix(seg, app+"_") || strings.HasPrefix(app, seg+"_") {
 			return true
 		}
 	}

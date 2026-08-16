@@ -91,10 +91,16 @@ func TestExecHelperGetsCanonicalPermSet(t *testing.T) {
 	if len(res.AllowRules) != 1 {
 		t.Fatalf("want 1 rule, got %+v", res)
 	}
-	got := res.AllowRules[0].Render()
+	// Check the permission SET, not the rendered string: strings.Contains(got,
+	// "execute") also matches "execute_no_trans", so a missing standalone
+	// "execute" would slip through (review finding).
+	permSet := map[string]bool{}
+	for _, p := range res.AllowRules[0].Perms {
+		permSet[p] = true
+	}
 	for _, perm := range []string{"execute", "execute_no_trans", "getattr", "map", "open", "read"} {
-		if !strings.Contains(got, perm) {
-			t.Errorf("canonical exec set missing %q: %s", perm, got)
+		if !permSet[perm] {
+			t.Errorf("canonical exec set missing %q: %v", perm, res.AllowRules[0].Perms)
 		}
 	}
 }

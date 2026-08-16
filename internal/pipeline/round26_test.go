@@ -362,3 +362,15 @@ func TestRunCleansVerifierStateOnFailure(t *testing.T) {
 		t.Error("a post-install failure must roll back the generated module (semodule -r)")
 	}
 }
+
+// Round 37: `semodule -i <app>.pp` replaces by MODULE NAME, so an existing
+// module named <app> that defines a differently-named domain must be detected as
+// a conflict even though our <app>_t type does not yet exist.
+func TestRunDetectsModuleNameConflict(t *testing.T) {
+	f := passingRunner()
+	f.responses["semodule -l"] = "widget\nbase\nmysql\n" // a module named widget exists
+	res := Run(f, testTarget(), Options{MaxRounds: 2})
+	if !strings.Contains(res.FailureReason, "name-conflict") && !strings.Contains(res.FailureReason, "already exists") {
+		t.Errorf("an existing module named <app> must be a conflict, got %q", res.FailureReason)
+	}
+}
