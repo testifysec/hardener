@@ -292,6 +292,31 @@ cat > %%{buildroot}%%{_datadir}/selinux/hardener/%[1]s.roots <<'HARDENER_ROOTS'
 %[9]sHARDENER_ROOTS
 
 %%pre
+# ABORTABLE PREFLIGHT (fresh install). These checks also run in %%post, but a
+# %%post failure cannot undo the transaction: rpm has already committed the payload
+# and the new NEVRA by then, so the install "fails" with files on disk and a DB
+# entry that makes a retry of the same NEVRA a no-op. %%pre runs BEFORE the commit,
+# so a non-zero exit here aborts the transaction cleanly and leaves nothing behind
+# (review finding — round 69). Only read-only, abortable VALIDATION belongs here;
+# activation stays in %%post (the remaining post-commit window is the recorded
+# activation-design decision, not something a scriptlet can close).
+if [ "$1" = 1 ]; then
+    # A module with our name must not already exist on a FIRST install — it would
+    # be foreign, and loading ours would shadow it (and a rollback would remove
+    # it). Fail closed if the module list cannot be read.
+    _preml="$(semodule -l 2>/dev/null)" || { echo "ERROR: 'semodule -l' failed; cannot confirm the %[1]s module is absent — refusing to risk shadowing a foreign module" >&2; exit 1; }
+    if printf '%%s\n' "$_preml" | grep -qE "^%[1]s([[:space:]]|$)"; then
+        echo "ERROR: a SELinux module named %[1]s already exists, but this is a fresh install; refusing to shadow a foreign module. Remove it first or build with a distinct name." >&2
+        exit 1
+    fi
+    # A differently-named foreign module can already own our PORT type; the port
+    # reconciliation in %%post would delete ITS mappings before semodule -i fails.
+    _prept="$(semanage port -l 2>/dev/null)" || { echo "ERROR: 'semanage port -l' failed; cannot confirm %[7]s is unclaimed — refusing" >&2; exit 1; }
+    if printf '%%s\n' "$_prept" | awk -v t=%[7]s '$1==t{f=1} END{exit !f}'; then
+        echo "ERROR: SELinux port type %[7]s already has mappings but this is a fresh install; a foreign module owns it — refusing to disturb it. Build with a distinct name." >&2
+        exit 1
+    fi
+fi
 # On upgrade, stash the OLD roots list BEFORE the new payload overwrites it, so
 # %%post can restore base labels on roots the new profile no longer claims
 # (review finding). The stash lives in the package-owned, root-only directory

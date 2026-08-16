@@ -1246,14 +1246,29 @@ func exercise(r vm.Runner, t *target.Target, dom string) ([]avc.Denial, bool, ru
 	// queued before it, so the offset taken afterward starts strictly past our own
 	// setup. Best-effort — if auditctl -m is unavailable the END barrier still fails
 	// closed later, so this only ever narrows the window, never widens it.
+	//
+	// The sentinel TEXT is constant per target, and exercise() runs once per observe
+	// /enforce round against a PERSISTENT audit log, so "the sentinel is present" is
+	// already true from round 2 onward — a mere presence check would be satisfied
+	// instantly by an OLD record and the barrier would not wait at all (review
+	// finding — round 69). Count the occurrences BEFORE emitting and wait for the
+	// count to INCREASE, which is specific to the record we just wrote.
 	startSentinel := fmt.Sprintf("hardener-start-%s", policy.SafeName(t.Name))
-	if _, serr := r.Run("sudo auditctl -m " + vm.ShellQuote(startSentinel)); serr == nil {
+	countStart := func() int {
+		out, err := r.Run("sudo grep -Fc " + vm.ShellQuote(startSentinel) + " /var/log/audit/audit.log 2>/dev/null || true")
+		if err != nil {
+			return -1
+		}
+		n, cerr := strconv.Atoi(strings.TrimSpace(out))
+		if cerr != nil {
+			return -1
+		}
+		return n
+	}
+	before := countStart()
+	if _, serr := r.Run("sudo auditctl -m " + vm.ShellQuote(startSentinel)); serr == nil && before >= 0 {
 		for i := 0; i < 10; i++ {
-			n, gerr := r.Run("sudo grep -Fc " + vm.ShellQuote(startSentinel) + " /var/log/audit/audit.log 2>/dev/null || true")
-			if gerr != nil {
-				continue
-			}
-			if s := strings.TrimSpace(n); s != "" && s != "0" {
+			if n := countStart(); n > before {
 				break
 			}
 		}
