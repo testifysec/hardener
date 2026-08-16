@@ -149,6 +149,28 @@ var dangerousTargets = map[string]bool{
 // these classes goes to review regardless of target ownership.
 var dangerousClasses = map[string]bool{
 	"bpf": true, "perf_event": true, "io_uring": true,
+	// memprotect governs process memory protections — mmap_zero (map the NULL
+	// page) is a classic kernel-exploit primitive.
+	"memprotect": true,
+}
+
+// safeSelfTargetClasses is a FAIL-CLOSED allowlist for a domain acting on ITSELF
+// (source == target). The base template already grants the common self classes,
+// so a self-target DENIAL is for something not pre-granted; only these plainly
+// benign classes (own files/fds, the standard socket + SysV-IPC primitives, own
+// keyring) auto-apply. Any OTHER self-target class — memprotect, an exotic
+// socket, an unknown future class — defaults to review rather than silently
+// shipping, since the foreign-type gate never sees an owned self-target.
+// Capability/process classes are handled by dangerReason's dedicated allowlists
+// and are intentionally omitted here.
+var safeSelfTargetClasses = map[string]bool{
+	"file": true, "dir": true, "lnk_file": true, "sock_file": true,
+	"fifo_file": true, "chr_file": true, "blk_file": true, "fd": true,
+	"unix_stream_socket": true, "unix_dgram_socket": true,
+	"tcp_socket": true, "udp_socket": true,
+	"netlink_route_socket": true, "netlink_socket": true,
+	"packet_socket": true, "rawip_socket": true,
+	"sem": true, "shm": true, "msg": true, "msgq": true, "key": true,
 }
 
 // genericTargets are broad shared types owned by no single application.
@@ -302,6 +324,16 @@ func dangerReason(r AllowRule) string {
 	// finding).
 	if dangerousClasses[r.Class] {
 		return "privileged object class requiring review: " + r.Class
+	}
+	// FAIL-CLOSED for a domain acting on ITSELF: the base template pre-grants the
+	// common self classes, so a self-target rule for anything NOT on the benign
+	// allowlist (and not a capability/process class, handled above) is an unusual
+	// self-permission — e.g. memprotect:mmap_zero, an exotic socket — that the
+	// foreign-type gate never sees (target is owned). Default it to review instead
+	// of auto-applying (review finding).
+	if r.Source == r.Target && !safeSelfTargetClasses[r.Class] &&
+		!isCapabilityClass(r.Class) && r.Class != "process" && r.Class != "process2" {
+		return "unrecognized self-target class requiring review: " + r.Class
 	}
 	if genericTargets[r.Target] {
 		return "broad shared type (grants access to other applications' files): " + r.Target

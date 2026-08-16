@@ -98,3 +98,16 @@ func TestRecheckFailsOnSameNameModuleContentSwap(t *testing.T) {
 		t.Fatalf("a same-name module content swap must fail closed, got %q", res.FailureReason)
 	}
 }
+
+// moduleContentDigest must FAIL CLOSED when the module files cannot be collected
+// (empty input must NOT hash to a passing constant). An uncollectable digest at
+// install time fails the run rather than establishing a meaningless baseline.
+// (review finding — round 58)
+func TestRunFailsClosedWhenModuleDigestUncollectable(t *testing.T) {
+	f := passingRunner()
+	f.responses["active/modules"] = "NO_MODULE_FILES" // find matched nothing
+	res := Run(f, testTarget(), Options{MaxRounds: 2})
+	if res.FailureReason == "" || !strings.Contains(res.FailureReason, "module-content-baseline") {
+		t.Fatalf("an uncollectable module digest must fail closed, got %q", res.FailureReason)
+	}
+}

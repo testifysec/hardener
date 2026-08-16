@@ -272,3 +272,40 @@ func TestDangerousObjectClassesFlaggedEvenWhenOwned(t *testing.T) {
 		}
 	}
 }
+
+// A domain acting on ITSELF with an unusual class must go to review: memprotect
+// (mmap_zero — a NULL-page-mapping exploit primitive) and any class outside the
+// benign self-target allowlist. Benign self classes (own sockets/IPC) still
+// auto-apply. (review finding — round 58)
+func TestSelfTargetClassesAreFailClosedAllowlist(t *testing.T) {
+	p := widgetProfile()
+
+	// memprotect:mmap_zero on the domain's own type must be flagged.
+	res := Refine(p, []avc.Denial{{SourceType: "widget_t", TargetType: "widget_t", Class: "memprotect", Perms: []string{"mmap_zero"}}})
+	if !anyFlagContains(res.Flags, "memprotect") {
+		t.Errorf("memprotect:mmap_zero on a self-target must be flagged, got %+v", res.Flags)
+	}
+
+	// An exotic/unknown self-target class must be flagged by the fail-closed allowlist.
+	res = Refine(p, []avc.Denial{{SourceType: "widget_t", TargetType: "widget_t", Class: "netlink_audit_socket", Perms: []string{"nlmsg_write"}}})
+	if !anyFlagContains(res.Flags, "self-target class") {
+		t.Errorf("an unrecognized self-target class must be flagged, got %+v", res.Flags)
+	}
+
+	// A benign self-target class (own tcp_socket) must NOT be flagged.
+	res = Refine(p, []avc.Denial{{SourceType: "widget_t", TargetType: "widget_t", Class: "tcp_socket", Perms: []string{"create", "listen"}}})
+	for _, f := range res.Flags {
+		if strings.Contains(f.Reason, "self-target class") {
+			t.Errorf("a benign self-target class must not be flagged: %+v", f)
+		}
+	}
+}
+
+func anyFlagContains(flags []Flag, sub string) bool {
+	for _, f := range flags {
+		if strings.Contains(f.Reason, sub) {
+			return true
+		}
+	}
+	return false
+}
