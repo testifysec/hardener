@@ -361,3 +361,32 @@ executables:
 		t.Errorf("a space-containing vendor binary must load: %v", err)
 	}
 }
+
+// Round 45: a `declared:` block requires party: second, and a `baseline:`
+// requires party: first — otherwise a supplier silently gets weaker third-party
+// handling and a passing attestation.
+func TestLoadRejectsDeclaredOrBaselineWithoutMatchingParty(t *testing.T) {
+	declaredNoParty := `name: widget
+install: "true"
+unit: widget.service
+exercise: "true"
+executables:
+  - /opt/widget/bin/widgetd
+declared: {}
+`
+	if _, err := Load(write(t, declaredNoParty)); err == nil {
+		t.Error("declared: without party: second must be rejected")
+	}
+	baselineWrongParty := `name: widget
+install: "true"
+unit: widget.service
+exercise: "true"
+party: third
+executables:
+  - /opt/widget/bin/widgetd
+baseline: baselines/widget.yaml
+`
+	if _, err := Load(write(t, baselineWrongParty)); err == nil {
+		t.Error("baseline: without party: first must be rejected")
+	}
+}
