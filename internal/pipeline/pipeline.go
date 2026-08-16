@@ -797,15 +797,50 @@ sudo semodule -i %s.pp
 	if _, err := r.Run(script); err != nil {
 		return err
 	}
+	// Relabel declared roots and FAIL CLOSED when a root that EXISTS cannot be
+	// labeled. Appending `|| true` made the error unobservable, so the verifier
+	// could sign a profile whose roots were never relabeled while the generated
+	// RPM later rejects the same state (review finding). A root the app creates on
+	// first run may not exist yet — skip it, don't fail.
 	for _, root := range RelabelRoots(p) {
-		if _, err := r.Run(fmt.Sprintf("sudo restorecon -RF -- %s 2>/dev/null || true", vm.ShellQuote(root))); err != nil {
-			return err
+		q := vm.ShellQuote(root)
+		if _, err := r.Run(fmt.Sprintf("if [ -e %s ]; then sudo restorecon -RF -- %s; fi", q, q)); err != nil {
+			return fmt.Errorf("could not relabel declared root %s on the verifier: %w", root, err)
 		}
 	}
+	// Assign each declared port and VERIFY it landed under our type. A discarded
+	// `semanage port -a` error let the verifier sign a profile whose ports were
+	// never assigned (review finding). Fail closed unless the mapping is present
+	// afterward (already-present is fine — semanage -a is idempotent-ish and the
+	// verify is what matters).
+	pt := policy.PortType(p.Name)
 	for _, port := range p.Ports {
-		_, _ = r.Run(fmt.Sprintf("sudo semanage port -a -t %s -p %s %d 2>/dev/null || true", policy.PortType(p.Name), port.Proto, port.Port))
+		_, _ = r.Run(fmt.Sprintf("sudo semanage port -a -t %s -p %s %d 2>/dev/null", pt, port.Proto, port.Port))
+		chk, err := r.Run(fmt.Sprintf("sudo semanage port -l 2>/dev/null | awk '$1==%q && $2==%q'", pt, port.Proto))
+		if err != nil || !portListed(chk, port.Port) {
+			return fmt.Errorf("port %d/%s was not assigned to %s on the verifier — refusing to sign an unenforced port mapping", port.Port, port.Proto, pt)
+		}
 	}
 	return nil
+}
+
+// portListed reports whether `semanage port -l` output (already filtered to the
+// app's type+proto) lists the given port, as a bare number or inside a range.
+func portListed(line string, port int) bool {
+	for _, tok := range strings.Fields(line) {
+		tok = strings.TrimSuffix(tok, ",")
+		if tok == strconv.Itoa(port) {
+			return true
+		}
+		if lo, hi, ok := strings.Cut(tok, "-"); ok {
+			l, e1 := strconv.Atoi(lo)
+			h, e2 := strconv.Atoi(hi)
+			if e1 == nil && e2 == nil && port >= l && port <= h {
+				return true
+			}
+		}
+	}
+	return false
 }
 
 // reconcileStalePorts deletes local port mappings of the app's port type that
@@ -882,7 +917,10 @@ func exercise(r vm.Runner, t *target.Target, dom string) ([]avc.Denial, bool, ru
 	// LOSS counter: if it climbs during the window the kernel dropped records on
 	// buffer overflow, so a zero-denial slice is not trustworthy (review finding).
 	en0, lost0, _, auOK0 := auditStatus(r)
-	if auOK0 && en0 == 0 {
+	if !auOK0 {
+		return nil, false, runInfo{}, fmt.Errorf("cannot query audit status (auditctl -s) before the exercise — refusing to observe denials without confirmed auditing (review finding)")
+	}
+	if en0 == 0 {
 		return nil, false, runInfo{}, fmt.Errorf("auditing is disabled on the verifier (auditctl -s enabled=0) — cannot observe denials; enable auditing and re-run")
 	}
 	if _, err := r.Run("sudo systemctl reset-failed " + t.Unit + " 2>/dev/null; true"); err != nil {
@@ -949,17 +987,21 @@ func exercise(r vm.Runner, t *target.Target, dom string) ([]avc.Denial, bool, ru
 	// read, so a late-written AVC is not missed as a false zero-denial (review
 	// finding). Each probe is a round-trip, so no sleep is needed. If the backlog
 	// is queryable but never drains, FAIL CLOSED rather than read a partial slice.
-	backlogDrained := true
+	backlogDrained := false
 	for i := 0; i < 5; i++ {
 		_, _, bl, ok := auditStatus(r)
-		if !ok || bl <= 0 {
+		if !ok {
+			// A transient auditctl failure here is NOT a drained backlog — treating
+			// it as one was fail-open (review finding). Retry within the bounded loop.
+			continue
+		}
+		if bl <= 0 {
 			backlogDrained = true
 			break
 		}
-		backlogDrained = false
 	}
 	if !backlogDrained {
-		return nil, exOK, run, fmt.Errorf("auditd backlog did not drain after the exercise — audit records may still be unwritten; re-run on a less loaded verifier")
+		return nil, exOK, run, fmt.Errorf("auditd backlog did not drain (or could not be confirmed) after the exercise — audit records may still be unwritten; re-run on a less loaded verifier")
 	}
 	// Fail closed on log rotation/truncation: a new inode or a shrunk file
 	// means our byte offset is stale and a plain tail would silently miss AVC
@@ -1003,7 +1045,11 @@ func exercise(r vm.Runner, t *target.Target, dom string) ([]avc.Denial, bool, ru
 	// read may be missing AVCs — a zero-denial result would be a false pass. Only
 	// enforced when both snapshots were readable (auditctl present) so a
 	// stat/audit-less environment is not spuriously blocked (review finding).
-	if _, lost1, _, auOK1 := auditStatus(r); auOK0 && auOK1 && lost0 >= 0 && lost1 > lost0 {
+	_, lost1, _, auOK1 := auditStatus(r)
+	if !auOK1 {
+		return nil, exOK, run, fmt.Errorf("cannot query audit status (auditctl -s) after the exercise — refusing to trust a denial set whose completeness is unconfirmed (review finding)")
+	}
+	if lost0 >= 0 && lost1 > lost0 {
 		return nil, exOK, run, fmt.Errorf("kernel audit records were lost during the exercise (lost %d→%d) — the denial set is incomplete; re-run on a less loaded verifier", lost0, lost1)
 	}
 	for _, te := range avc.ParseTransitionErrors(out) {
