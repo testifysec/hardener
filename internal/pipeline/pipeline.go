@@ -145,13 +145,22 @@ func Run(r vm.Runner, t *target.Target, opts Options) *Result {
 	// name-conflict check and taint later runs) (review finding). Best-effort and
 	// idempotent; runs on every unsuccessful return via fail().
 	moduleInstalled := false
+	// targetTouched is armed immediately before the target's own Install script
+	// runs — the first moment hardener can be responsible for the unit's state.
+	// Quiescence is gated on it: `fail()` also fires for PRE-install failures
+	// (precheck, name-conflict), and stopping the unit there would SIGKILL a
+	// service hardener never touched — on a persistent verifier that is somebody
+	// else's running workload (review finding — round 75, a regression from the
+	// round-67 unconditional-quiescence fix).
+	targetTouched := false
 	cleanupVerifierState := func() {
 		// STOP THE UNIT ON EVERY POST-INSTALL FAILURE, whether or not our module
 		// loaded. install/setup can START the service and then fail BEFORE
 		// moduleInstalled is armed; gating quiescence on module cleanup left that
 		// service active — and, with no module of ours loaded, UNCONFINED — on the
-		// persistent verifier (review finding). So quiescence runs first,
-		// unconditionally; only the SELinux-state teardown below is module-gated.
+		// persistent verifier (review finding). So quiescence runs before the
+		// module-gated teardown below, but only once we have actually touched the
+		// target.
 		//
 		// NEVER tear down confinement around a LIVE process. Cleanup removes the
 		// permissive entry, ports, module, and labels; doing that while the
@@ -160,7 +169,7 @@ func Run(r vm.Runner, t *target.Target, opts Options) *Result {
 		// (review finding). Force-kill and re-verify first; if the unit still
 		// cannot be proven dead, PRESERVE everything (the module keeps it confined)
 		// and leave a loud note for manual cleanup rather than un-confine it.
-		if t.Unit != "" {
+		if t.Unit != "" && targetTouched {
 			quiescent := func() bool {
 				out, _ := r.Run(fmt.Sprintf("systemctl is-active %s", t.Unit))
 				switch strings.TrimSpace(out) {
@@ -340,7 +349,10 @@ func Run(r vm.Runner, t *target.Target, opts Options) *Result {
 			"SELinux type %s already exists on the verifier — %s is already confined by an existing policy (or its name collides with distro policy); hardener will not shadow it. Use a distinct name or a clean verifier", dom, t.Name))
 	}
 
-	// 1. Install the application.
+	// 1. Install the application. From here on hardener is responsible for the
+	// unit's state, so cleanup may stop it; before this point a failure must leave
+	// any same-named running service alone (review finding — round 75).
+	targetTouched = true
 	opts.Log("[%s] installing", t.Name)
 	if _, err := r.Run("set -e\n" + t.Install); err != nil {
 		return fail("install", err)

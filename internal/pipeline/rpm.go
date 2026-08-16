@@ -295,6 +295,25 @@ func GenerateSpec(p *profile.Profile, revision string) string {
 		fmt.Fprintf(&restore, "restorecon -F -- %s 2>/dev/null || echo 'warning: could not restore a %s entrypoint label after removal' >&2\n",
 			vm.ShellQuote(exe), app)
 	}
+	// restoreStrict is the %postun variant. There, reducing a restorecon failure to
+	// a warning let the erase SUCCEED while existing files kept now-undefined app
+	// types — dangling labels that can make those files inaccessible, with the
+	// module already gone and no obvious way back (review finding — round 75). A
+	// path that no longer EXISTS is skipped (nothing to relabel); a path that exists
+	// and cannot be relabeled fails the uninstall loudly. Best-effort remains
+	// correct in the %post ROLLBACK paths above, which are already handling a
+	// failure and must finish their remaining steps.
+	var restoreStrict strings.Builder
+	for _, root := range RelabelRoots(p) {
+		fmt.Fprintf(&restoreStrict,
+			"if [ -e %[1]s ]; then restorecon -RF -- %[1]s || { echo \"ERROR: could not restore base file labels under a %[2]s path after module removal; those files keep an undefined SELinux type and may be inaccessible — run: sudo restorecon -RF <path>\" >&2; exit 1; }; fi\n",
+			vm.ShellQuote(root), app)
+	}
+	for _, exe := range p.Executables {
+		fmt.Fprintf(&restoreStrict,
+			"if [ -e %[1]s ]; then restorecon -F -- %[1]s || { echo \"ERROR: could not restore the base label on a %[2]s entrypoint after module removal; it keeps an undefined SELinux type and may be unexecutable — run: sudo restorecon -F <path>\" >&2; exit 1; }; fi\n",
+			vm.ShellQuote(exe), app)
+	}
 	// rootsContent is the list of file-context roots this build labels, shipped
 	// as <app>.roots so an upgrade can detect roots REMOVED from the profile and
 	// restore their base labels (review finding).
@@ -580,13 +599,14 @@ if [ $1 -eq 0 ]; then
     if [ "$_mlurc" != 0 ] || [ -z "$_mlu" ]; then echo "ERROR: cannot verify %[1]s module removal during uninstall (semodule -l failed or returned nothing)" >&2; exit 1; fi
     if printf '%%s\n' "$_mlu" | grep -qE "^%[1]s([[:space:]]|$)"; then echo "ERROR: the %[1]s policy module is still installed after uninstall; remove it manually: sudo semodule -r %[1]s" >&2; exit 1; fi
     # Restore base file labels now that the app types are undefined, or the
-    # files would be left with a dangling label and become inaccessible.
-%[6]s
+    # files would be left with a dangling label and become inaccessible. Fails
+    # CLOSED on an existing path that cannot be relabeled (absent paths skipped).
+%[11]s
 fi
 
 %%files
 %%{_datadir}/selinux/packages/%[1]s.pp
 %%{_datadir}/selinux/hardener/%[1]s.fc
 %%{_datadir}/selinux/hardener/%[1]s.roots
-`, app, relabel.String(), ports.String(), portsDel.String(), revision, restore.String(), appPortType, reconcile, rootsContent.String(), preflight.String())
+`, app, relabel.String(), ports.String(), portsDel.String(), revision, restore.String(), appPortType, reconcile, rootsContent.String(), preflight.String(), restoreStrict.String())
 }

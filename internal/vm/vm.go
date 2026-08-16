@@ -22,12 +22,14 @@ import (
 // slice it would mistake for complete.
 const MaxOutputBytes = 64 << 20 // 64 MiB
 
-// cappedWriter accumulates output up to limit, then refuses further writes so the
-// command is torn down. It keeps what it captured for diagnostics.
+// cappedWriter accumulates output up to limit, then refuses further writes and
+// invokes onOver so the command can be torn down. It keeps what it captured for
+// diagnostics.
 type cappedWriter struct {
-	buf   strings.Builder
-	limit int
-	over  bool
+	buf    strings.Builder
+	limit  int
+	over   bool
+	onOver func() // called once, when the limit is first exceeded
 }
 
 var errOutputTooLarge = fmt.Errorf("script output exceeded %d bytes", MaxOutputBytes)
@@ -41,15 +43,28 @@ func (w *cappedWriter) Write(p []byte) (int, error) {
 			w.buf.Write(p[:room])
 		}
 		w.over = true
+		// Returning an error stops the copy goroutine but does NOT stop the child:
+		// a process emitting continuous output would then block on a full pipe until
+		// the 10-minute timeout, holding the runner for no reason (review finding —
+		// round 75). Kill it now.
+		if w.onOver != nil {
+			w.onOver()
+		}
 		return 0, errOutputTooLarge
 	}
 	return w.buf.Write(p)
 }
 
-// runCapped runs cmd with both streams captured into a size-limited buffer.
-// Returns the captured output, whether the limit was hit, and the run error.
+// runCapped runs cmd with both streams captured into a size-limited buffer,
+// killing the child as soon as the limit is exceeded. Returns the captured
+// output, whether the limit was hit, and the run error.
 func runCapped(cmd *exec.Cmd) (string, bool, error) {
 	w := &cappedWriter{limit: MaxOutputBytes}
+	w.onOver = func() {
+		if cmd.Process != nil {
+			_ = cmd.Process.Kill()
+		}
+	}
 	cmd.Stdout = w
 	cmd.Stderr = w
 	err := cmd.Run()
