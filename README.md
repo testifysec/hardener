@@ -231,16 +231,41 @@ MongoDB was evaluated and dropped: the distro policy already defines
 Signed binaries ship from **dist.testifysec.com** (authenticated SFTP + web
 portal; contact TestifySec for access). Every release is built by a
 cilock-attested pipeline and arrives with everything needed to verify it
-offline — the binary, its sha256, an in-toto/DSSE attestation bundle, a
-signed verify policy pinning the exact build workflow and tag, and the
-`cilock` verifier itself:
+offline. All files are prefixed with the release name `<rel>` (e.g.
+`hardener-0.1.0-linux-amd64`): the binary `<rel>`, its `<rel>.sha256`, an
+in-toto/DSSE bundle `<rel>.intoto.tgz`, a signed verify policy
+`<rel>.policy.json.signed` pinning the exact build workflow and tag, the
+Fulcio/TSA roots `<rel>.fulcio-root.pem` / `<rel>.tsa-root.pem`, and the
+`cilock` verifier `<rel>.cilock-linux-amd64` with its signed checksum
+`<rel>.cilock-linux-amd64.sha256(.dsse)`.
+
+**Step 1 — authenticate the verifier before running it.** The `cilock` you
+pull comes from the dist host, which is not a trust anchor: a compromised host
+could swap the verifier, its checksum, and the signature together. Authenticate
+it out-of-band with a DSSE verifier you already trust (an independently-obtained
+`cilock`, or `cosign`) — never let the downloaded `cilock` check itself. Run it
+only once both pass:
 
 ```bash
-mkdir attestations && tar -xzf hardener-<ver>-linux-amd64.intoto.tgz -C attestations
-./cilock-linux-amd64 verify hardener-<ver>-linux-amd64 \
-  --policy hardener-<ver>-linux-amd64.policy.json.signed \
-  --policy-ca-roots platform-testifysec-fulcio-root.pem \
-  --policy-timestamp-servers platform-testifysec-tsa-root.pem \
+# (a) integrity — the pulled verifier matches its signed checksum
+sha256sum -c <rel>.cilock-linux-amd64.sha256
+# (b) provenance — <rel>.cilock-linux-amd64.sha256.dsse was signed by THIS release identity:
+#     issuer   https://token.actions.githubusercontent.com
+#     identity https://github.com/testifysec/judge/.github/workflows/release-hardener.yml@refs/tags/hardener-v*
+#     roots    <rel>.fulcio-root.pem  (Fulcio)   <rel>.tsa-root.pem  (RFC 3161 TSA)
+# Reject the release if either check fails.
+```
+
+**Step 2 — verify the artifact with the now-trusted verifier.** The shipped
+`cilock` has the Fulcio/TSA roots and the pinned policy-signer identity compiled
+in, so no `--policy-*` trust flags are needed and a policy signed by any other
+identity is rejected:
+
+```bash
+mkdir attestations && tar -xzf <rel>.intoto.tgz -C attestations
+chmod +x <rel>.cilock-linux-amd64
+./<rel>.cilock-linux-amd64 verify <rel> \
+  --policy <rel>.policy.json.signed \
   --attestations attestations/clone.attestation.json,attestations/build.attestation.json
 ```
 

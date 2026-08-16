@@ -105,22 +105,51 @@ func TestStaticCheckFailsClosedWhenQueryErrors(t *testing.T) {
 	}
 }
 
-// The permissive check greps a list and legitimately exits non-zero when the
-// domain is absent (the safe outcome). That non-zero exit must be read as
-// "pass", not as a query-execution failure.
-func TestPermissiveCheckPassesOnNoGrepMatch(t *testing.T) {
-	f := &fakeRunner{
+// Round 14: the permissive check requires semanage to SUCCEED, then decides
+// membership in Go. A domain absent from a successful listing passes; a
+// semanage that fails to run is unverifiable and must fail closed (the old
+// piped `semanage | grep` read a semanage failure as "not permissive").
+func TestPermissiveCheckRequiresSemanageSuccess(t *testing.T) {
+	base := map[string]string{
+		"command -v sesearch": "TOOLS_OK",
+		"-s init_t":           "allow init_t bin_t:file execute;",
+	}
+	find := func(checks []StaticCheck) StaticCheck {
+		for _, c := range checks {
+			if strings.Contains(c.Name, "permissive") {
+				return c
+			}
+		}
+		t.Fatal("no permissive check produced")
+		return StaticCheck{}
+	}
+
+	// semanage succeeds, domain NOT listed → pass.
+	ok := base
+	ok["semanage permissive -l"] = "unconfined_service_t\nother_daemon_t"
+	if c := find(staticChecks(&fakeRunner{responses: ok}, "myapp_t")); !c.Passed {
+		t.Errorf("domain absent from a successful listing must pass, got %+v", c)
+	}
+
+	// semanage succeeds, domain IS listed → fail.
+	listed := map[string]string{
+		"command -v sesearch":    "TOOLS_OK",
+		"-s init_t":              "allow init_t bin_t:file execute;",
+		"semanage permissive -l": "myapp_t\nother_daemon_t",
+	}
+	if c := find(staticChecks(&fakeRunner{responses: listed}, "myapp_t")); c.Passed {
+		t.Errorf("a permissive domain must fail the check, got %+v", c)
+	}
+
+	// semanage FAILS to run → fail closed (not "clean").
+	failing := &fakeRunner{
 		responses: map[string]string{
 			"command -v sesearch": "TOOLS_OK",
 			"-s init_t":           "allow init_t bin_t:file execute;",
 		},
-		// grep with no match exits 1.
 		failOn: []string{"semanage permissive"},
 	}
-	checks := staticChecks(f, "myapp_t")
-	for _, c := range checks {
-		if strings.Contains(c.Name, "permissive") && !c.Passed {
-			t.Errorf("permissive check must pass when the domain is not in the permissive list (grep no-match), got %+v", c)
-		}
+	if c := find(staticChecks(failing, "myapp_t")); c.Passed {
+		t.Errorf("a semanage that cannot run must fail closed, got %+v", c)
 	}
 }
