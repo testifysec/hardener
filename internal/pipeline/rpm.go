@@ -12,16 +12,34 @@ import (
 // buildRPM packages the compiled .pp as <app>-selinux RPM inside the VM and
 // returns the built RPM path (inside the VM). The .fc it ships is the one
 // installPolicy wrote, which already omits base-policy collisions.
-func buildRPM(r vm.Runner, p *profile.Profile, revision string) (string, error) {
+func buildRPM(r vm.Runner, p *profile.Profile, revision, te, fc string) (string, error) {
 	app := policy.SafeName(p.Name)
 	spec := GenerateSpec(p, revision)
 	if err := r.WriteFile(fmt.Sprintf("/tmp/hardener/%s/%s-selinux.spec", app, app), spec); err != nil {
 		return "", err
 	}
+	// Compile the PACKAGED .pp FRESH from the VERIFIED policy text (res.FinalTE/
+	// res.FinalFC, passed by the caller — in-memory Go strings the guest cannot
+	// touch) into a dedicated pkg dir, instead of copying the staged
+	// /tmp/hardener/<app>/<app>.pp. A root-privileged exercise could have
+	// overwritten that staged file AFTER enforcement, so copying it would package
+	// unverified policy bytes while the loaded module stayed clean (review
+	// finding). No exercise runs during packaging, and SELinux module compilation
+	// is deterministic, so bytes written+compiled here are exactly what was
+	// enforced. FAIL CLOSED if the write fails.
+	pkg := fmt.Sprintf("/tmp/hardener/%s/pkg", app)
+	if err := r.WriteFile(pkg+"/"+app+".te", te); err != nil {
+		return "", err
+	}
+	if err := r.WriteFile(pkg+"/"+app+".fc", fc); err != nil {
+		return "", err
+	}
 	script := fmt.Sprintf(`set -e
 mkdir -p ~/rpmbuild/{SOURCES,SPECS}
-cp /tmp/hardener/%[1]s/%[1]s.pp ~/rpmbuild/SOURCES/
-cp /tmp/hardener/%[1]s/%[1]s.fc ~/rpmbuild/SOURCES/
+cd /tmp/hardener/%[1]s/pkg
+sudo make -f /usr/share/selinux/devel/Makefile %[1]s.pp
+cp /tmp/hardener/%[1]s/pkg/%[1]s.pp ~/rpmbuild/SOURCES/
+cp /tmp/hardener/%[1]s/pkg/%[1]s.fc ~/rpmbuild/SOURCES/
 cp /tmp/hardener/%[1]s/%[1]s-selinux.spec ~/rpmbuild/SPECS/
 rpmbuild -bb ~/rpmbuild/SPECS/%[1]s-selinux.spec
 `, app)

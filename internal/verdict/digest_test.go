@@ -122,6 +122,7 @@ func TestStatementIsDeterministic(t *testing.T) {
 		"/usr/sbin/a": goodSHA, "/usr/sbin/b": goodSHA, "/usr/sbin/c": goodSHA,
 		"/usr/sbin/d": goodSHA, "/usr/sbin/e": goodSHA,
 	}
+	r.EntrypointPaths = []string{"/usr/sbin/a", "/usr/sbin/b", "/usr/sbin/c", "/usr/sbin/d", "/usr/sbin/e"}
 	var first []byte
 	for i := 0; i < 20; i++ {
 		st, err := BuildOrErr(r, Env{Mode: "Enforcing"}, nil)
@@ -238,6 +239,7 @@ func TestVerdictRejectsUnrelatedExtraWithoutArtifact(t *testing.T) {
 	}
 	// With entrypoint bytes present, the same build succeeds.
 	r.EntrypointDigests = map[string]string{"/opt/widget/bin/widgetd": goodSHA}
+	r.EntrypointPaths = []string{"/opt/widget/bin/widgetd"}
 	if _, err := BuildOrErr(r, Env{}, nil); err != nil {
 		t.Errorf("exercised entrypoint bytes must satisfy the artifact requirement: %v", err)
 	}
@@ -285,5 +287,41 @@ func TestPassingVerdictRequiresEntrypointDigestsEvenWithRPM(t *testing.T) {
 	r.EntrypointDigests = map[string]string{"/usr/sbin/widgetd": goodSHA}
 	if _, err := BuildOrErr(r, Env{}, rpmSubject); err != nil {
 		t.Fatalf("app entrypoints + bound RPM must be accepted: %v", err)
+	}
+}
+
+// A non-empty EntrypointDigests is not enough: a passing verdict must bind a
+// digest for EVERY resolved entrypoint (an omitted one could change without
+// invalidating the signature) and must not bind any path outside the resolved
+// set. (review finding — round 55)
+func TestPassingVerdictValidatesEntrypointSetCompletely(t *testing.T) {
+	// Missing: two entrypoints resolved, only one bound → reject.
+	r := passingResult()
+	r.RPMPath = ""
+	r.EntrypointPaths = []string{"/usr/sbin/widgetd", "/usr/sbin/widget-helper"}
+	r.EntrypointDigests = map[string]string{"/usr/sbin/widgetd": goodSHA} // helper omitted
+	if _, err := BuildOrErr(r, Env{}, nil); err == nil {
+		t.Error("a resolved entrypoint with no bound digest must be rejected")
+	}
+
+	// Extra: a bound path that was never in the resolved set → reject.
+	r = passingResult()
+	r.RPMPath = ""
+	r.EntrypointPaths = []string{"/usr/sbin/widgetd"}
+	r.EntrypointDigests = map[string]string{
+		"/usr/sbin/widgetd":  goodSHA,
+		"/usr/bin/unrelated": goodSHA, // never resolved as an entrypoint
+	}
+	if _, err := BuildOrErr(r, Env{}, nil); err == nil {
+		t.Error("an entrypoint digest for a path outside the resolved set must be rejected")
+	}
+
+	// Exact match of every resolved entrypoint → accept.
+	r = passingResult()
+	r.RPMPath = ""
+	r.EntrypointPaths = []string{"/usr/sbin/widgetd", "/usr/sbin/widget-helper"}
+	r.EntrypointDigests = map[string]string{"/usr/sbin/widgetd": goodSHA, "/usr/sbin/widget-helper": goodSHA}
+	if _, err := BuildOrErr(r, Env{}, nil); err != nil {
+		t.Errorf("binding every resolved entrypoint must be accepted: %v", err)
 	}
 }
