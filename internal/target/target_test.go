@@ -362,6 +362,51 @@ executables:
 	}
 }
 
+// Round 64: a '%' in a path or executable must be rejected. GenerateSpec
+// interpolates these into the RPM spec, and rpmbuild expands %{...}/%(...) macros
+// throughout the spec — including %post scriptlets and the HARDENER_ROOTS heredoc —
+// BEFORE the shell runs. ShellQuote guards the shell, not rpmbuild, so a '%' would
+// let a manifest execute a command at build time or expand a macro, diverging the
+// signed RPM from the verified policy (review finding).
+func TestLoadRejectsRPMMacroInjection(t *testing.T) {
+	// Paths: '%' must be rejected regardless of ownership (the check runs early).
+	for _, bad := range []string{
+		"/opt/widget%(id)/config",   // %(...) command expansion at rpmbuild time
+		"/opt/widget/%{_bindir}",    // %{...} macro expansion
+		"/opt/widget/conf%",         // bare percent
+	} {
+		_, err := Load(write(t, fmt.Sprintf(pathManifest, bad)))
+		if err == nil {
+			t.Errorf("path %q with '%%' must be rejected", bad)
+			continue
+		}
+		if !strings.Contains(err.Error(), "macro-expand") {
+			t.Errorf("path %q: expected an rpmbuild macro-expansion rejection, got: %v", bad, err)
+		}
+	}
+	// Executables: same rule (spaces are allowed, but '%' is not).
+	exeTmpl := `name: widget
+install: "true"
+unit: widget.service
+exercise: "true"
+executables:
+  - %s
+`
+	for _, bad := range []string{
+		`"/opt/widget/bin/%(id)"`,
+		`"/opt/widget/bin/wd%{nil}"`,
+	} {
+		_, err := Load(write(t, fmt.Sprintf(exeTmpl, bad)))
+		if err == nil {
+			t.Errorf("executable %q with '%%' must be rejected", bad)
+			continue
+		}
+		if !strings.Contains(err.Error(), "macro-expand") {
+			t.Errorf("executable %q: expected an rpmbuild macro-expansion rejection, got: %v", bad, err)
+		}
+	}
+}
+
 // Round 45: a `declared:` block requires party: second, and a `baseline:`
 // requires party: first — otherwise a supplier silently gets weaker third-party
 // handling and a passing attestation.
