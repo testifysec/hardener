@@ -299,6 +299,31 @@ func Load(path string) (*Target, error) {
 			return nil, fmt.Errorf("%s: ports[%d]: port must be 1–65535 (got %d)", path, i, po.Port)
 		}
 	}
+	// Every executable is relabeled as the app exec type and interpolated into
+	// %post shell, so validate path-safety: absolute, canonical (no ".." or
+	// non-canonical form), and free of newline/control bytes (review finding —
+	// Load previously only checked the list was non-empty). Spaces ARE allowed
+	// (vendor binaries like "Plex Media Server"). NOTE: this validates the path
+	// shape, not app OWNERSHIP — an executable named after a system binary
+	// (/usr/bin/curl) still needs the deferred package-ownership check; that
+	// remains the pipeline's isAppOwnedExecutable guard plus the recorded design
+	// decision.
+	for i, exe := range t.Executables {
+		if !strings.HasPrefix(exe, "/") {
+			return nil, fmt.Errorf("%s: executables[%d] (%s): must be an absolute path", path, i, exe)
+		}
+		if strings.ContainsFunc(exe, unicode.IsControl) {
+			return nil, fmt.Errorf("%s: executables[%d]: contains a control character (newline/tab/NUL)", path, i)
+		}
+		if filepath.Clean(exe) != exe {
+			return nil, fmt.Errorf("%s: executables[%d] (%s): non-canonical path (resolves to %q) — declare the canonical path", path, i, exe, filepath.Clean(exe))
+		}
+		for _, seg := range strings.Split(exe, "/") {
+			if seg == ".." {
+				return nil, fmt.Errorf("%s: executables[%d] (%s): path traversal ('..') is not allowed", path, i, exe)
+			}
+		}
+	}
 	return &t, nil
 }
 

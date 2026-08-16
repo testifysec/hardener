@@ -335,3 +335,29 @@ paths:
 		}
 	}
 }
+
+// Round 41: executables must be validated for path-safety (absolute, canonical,
+// no traversal/control) — Load previously only checked the list was non-empty.
+func TestLoadValidatesExecutablePaths(t *testing.T) {
+	tmpl := `name: widget
+install: "true"
+unit: widget.service
+exercise: "true"
+executables:
+  - %s
+`
+	for _, bad := range []string{
+		"relative/widgetd",         // not absolute
+		"/opt/widget/../../bin/sh", // traversal
+		"/opt//widget/bin/widgetd", // non-canonical
+		"/opt/widget/bin/wd\ttab",  // control char
+	} {
+		if _, err := Load(write(t, fmt.Sprintf(tmpl, bad))); err == nil {
+			t.Errorf("executable %q must be rejected", bad)
+		}
+	}
+	// A vendor binary WITH SPACES is still allowed (Plex Media Server).
+	if _, err := Load(write(t, fmt.Sprintf(tmpl, `"/usr/lib/plexmediaserver/Plex Media Server"`))); err != nil {
+		t.Errorf("a space-containing vendor binary must load: %v", err)
+	}
+}
