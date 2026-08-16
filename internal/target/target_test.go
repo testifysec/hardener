@@ -225,3 +225,20 @@ paths:
 		t.Error("owned: true must not override the broad-system-root guard")
 	}
 }
+
+// Round 31: unknown manifest fields must be REJECTED — a typo like `partyy:`
+// would otherwise be silently ignored, leaving Party empty (third-party) and
+// dropping the fail-closed conformance rules for a second-party artifact.
+func TestLoadRejectsUnknownField(t *testing.T) {
+	m := `name: widget
+install: "true"
+unit: widget.service
+exercise: "true"
+executables:
+  - /opt/widget/bin/widgetd
+partyy: second
+`
+	if _, err := Load(write(t, m)); err == nil {
+		t.Error("an unknown/misspelled manifest field must be rejected")
+	}
+}

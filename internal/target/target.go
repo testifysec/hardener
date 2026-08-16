@@ -2,6 +2,7 @@
 package target
 
 import (
+	"bytes"
 	"fmt"
 	"os"
 	"path/filepath"
@@ -122,7 +123,13 @@ func Load(path string) (*Target, error) {
 		return nil, err
 	}
 	var t Target
-	if err := yaml.Unmarshal(raw, &t); err != nil {
+	// Reject UNKNOWN fields. A silent-ignore decode turns a typo like
+	// `partyy: second` into an empty Party — which defaults to third-party
+	// handling, so failureOf no longer fails on undeclared behavior and the
+	// artifact gets a passing attestation under weaker rules (review finding).
+	dec := yaml.NewDecoder(bytes.NewReader(raw))
+	dec.KnownFields(true)
+	if err := dec.Decode(&t); err != nil {
 		return nil, fmt.Errorf("%s: %w", path, err)
 	}
 	switch t.Party {
