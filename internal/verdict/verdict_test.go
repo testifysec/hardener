@@ -123,3 +123,16 @@ func TestJSONWireFormat(t *testing.T) {
 		t.Errorf("predicate missing conformance block")
 	}
 }
+
+// A recovered base-policy collision (non-entrypoint: the pipeline drops the
+// path and the app runs less-confined there) must surface in the verdict STATUS
+// as pass-with-exceptions, not sit silently in the predicate body under a clean
+// "pass". Entrypoint collisions fail earlier, so any collision reaching the
+// verdict is a recovered one — disclosed, not fatal. (review finding — round 50)
+func TestCollisionsYieldPassWithExceptions(t *testing.T) {
+	r := passingResult()
+	r.Collisions = []policy.Collision{{Path: "/var/lib/widget/shared", BaseType: "var_lib_t", WouldBeType: "widget_var_lib_t"}}
+	if v := Build(r, Env{}, nil).Predicate.Verdict; v != "pass-with-exceptions" {
+		t.Errorf("a recovered collision must disclose in the verdict status, got %q", v)
+	}
+}

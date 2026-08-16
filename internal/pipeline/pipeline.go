@@ -498,6 +498,19 @@ func Run(r vm.Runner, t *target.Target, opts Options) *Result {
 	}
 	defer func() { _ = clearPermissive() }()
 
+	// Snapshot the SELinux module set NOW — install/setup have run (any legitimate
+	// vendor module is already present) but our module is not yet loaded. Target-
+	// controlled install/setup/exercise code can load an AUXILIARY allow module to
+	// suppress the very AVCs enforcement verification relies on, producing a clean
+	// pass whose grants are absent from FinalTE and the shipped RPM. recheck (below,
+	// run before AND after the enforce loop) fails closed if any module appears
+	// beyond this baseline plus our own (review finding). Fail closed if unreadable.
+	expectedMods, err := moduleNameSet(r)
+	if err != nil {
+		return fail("module-baseline", err)
+	}
+	expectedMods[appMod] = true
+
 	var extraRules []policy.AllowRule
 	prevRelabels := ""
 	for round := 1; round <= opts.MaxRounds; round++ {
@@ -607,6 +620,22 @@ func Run(r vm.Runner, t *target.Target, opts Options) *Result {
 		// 2=locked) and fail closed if it cannot be confirmed (review finding).
 		if en, _, _, ok := auditStatus(r); !ok || en < 1 {
 			return fmt.Errorf("verifier integrity lost %s: auditing is not confirmed enabled (auditctl -s enabled=%d, queryable=%v)", when, en, ok)
+		}
+		// No UNEXPECTED SELinux module may have appeared since the pre-exercise
+		// baseline. A target-loaded auxiliary allow module can grant what our
+		// generated policy does not — suppressing the denials this verification
+		// samples — so EnforceOK could read true while the grants never reach
+		// FinalTE or the shipped RPM. Fail closed on any module beyond {baseline
+		// ∪ our own} (review finding). A REMOVED module is not checked: it can
+		// only ADD denials (surfacing as residuals), never hide them.
+		cur, merr := moduleNameSet(r)
+		if merr != nil {
+			return fmt.Errorf("verifier integrity lost %s: cannot enumerate SELinux modules: %w", when, merr)
+		}
+		for m := range cur {
+			if !expectedMods[m] {
+				return fmt.Errorf("verifier integrity lost %s: unexpected SELinux module %q loaded since baseline — a foreign policy module can suppress denials and fake a clean enforcement; refusing", when, m)
+			}
 		}
 		return nil
 	}
@@ -1348,6 +1377,27 @@ func captureRunInfo(r vm.Runner, unit string) runInfo {
 // absent from the output are returned as -1; ok is false when auditctl cannot be
 // queried at all, so callers can skip (best-effort) on a verifier without audit
 // tooling while still enforcing when it IS present.
+// moduleNameSet returns the set of installed SELinux module names (field 0 of
+// each `semodule -l` line). Fails closed: an unreadable or empty module list
+// must never be mistaken for "no extra modules" — semodule -l always lists many
+// base modules, so empty output is itself an enumeration failure.
+func moduleNameSet(r vm.Runner) (map[string]bool, error) {
+	out, err := r.Run("sudo semodule -l 2>/dev/null")
+	if err != nil {
+		return nil, fmt.Errorf("semodule -l failed: %w", err)
+	}
+	set := map[string]bool{}
+	for _, line := range strings.Split(out, "\n") {
+		if f := strings.Fields(line); len(f) > 0 {
+			set[f[0]] = true
+		}
+	}
+	if len(set) == 0 {
+		return nil, fmt.Errorf("semodule -l returned no modules — refusing to trust an empty module list")
+	}
+	return set, nil
+}
+
 func auditStatus(r vm.Runner) (enabled, lost, backlog int, ok bool) {
 	out, err := r.Run("sudo auditctl -s 2>/dev/null")
 	if err != nil || strings.TrimSpace(out) == "" {

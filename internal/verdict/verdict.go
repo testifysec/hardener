@@ -313,9 +313,18 @@ func verdictOf(res *pipeline.Result) string {
 	if failureOf(res) != "" {
 		return "fail"
 	}
-	if len(res.AcceptedExceptions) > 0 || len(res.Flags) > 0 {
+	if len(res.AcceptedExceptions) > 0 || len(res.Flags) > 0 || len(res.Collisions) > 0 {
 		// Flags reaching a passing verdict means they were consciously
-		// accepted; the verdict still discloses the deviation.
+		// accepted; the verdict still discloses the deviation. A base-policy
+		// COLLISION is the same shape of disclosed deviation: the pipeline
+		// deliberately recovers from a non-entrypoint collision (drops the
+		// path, the app runs less-confined there) — that is a real reduction
+		// in confinement and must surface in the verdict STATUS, not sit
+		// silently in the predicate body while the top line reads a clean
+		// "pass" (review finding). Entrypoint collisions already fail earlier,
+		// so any collision reaching here is a recovered one; forcing a hard
+		// FAIL instead would reverse the deliberate recoverable-collision
+		// design and is a product-semantics call for the owner, not this loop.
 		return "pass-with-exceptions"
 	}
 	return "pass"
