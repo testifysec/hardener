@@ -78,7 +78,16 @@ type TargetInfo struct {
 }
 
 type Gates struct {
+	// ExerciseEnforcing is the COMBINED gate: the workload ran successfully AND
+	// it ran under verified enforcement. It was previously populated from
+	// res.ExerciseOK alone, so a run whose enforcement verification FAILED but
+	// whose exercise happened to succeed serialized this gate as true — the signed
+	// predicate advertised "exercised under enforcement" for a policy that never
+	// reached a verified enforcing state (review finding — round 68). Both inputs
+	// are now serialized separately as well, so a consumer can tell the two apart.
 	ExerciseEnforcing  bool          `json:"exerciseEnforcing"`
+	ExerciseSucceeded  bool          `json:"exerciseSucceeded"`
+	EnforcementProven  bool          `json:"enforcementProven"`
 	DomainProof        bool          `json:"domainProof"`
 	ResidualDenials    int           `json:"residualDenials"`
 	StaticChecks       []CheckResult `json:"staticChecks,omitempty"`
@@ -213,7 +222,9 @@ func BuildOrErr(res *pipeline.Result, env Env, extra []Subject) (Statement, erro
 		},
 		Verifier: env,
 		Gates: Gates{
-			ExerciseEnforcing: res.ExerciseOK,
+			ExerciseEnforcing: res.ExerciseOK && res.EnforceOK,
+			ExerciseSucceeded: res.ExerciseOK,
+			EnforcementProven: res.EnforceOK,
 			DomainProof:       res.DomainOK,
 			ResidualDenials:   len(res.ResidualAVCs),
 		},

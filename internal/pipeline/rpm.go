@@ -48,10 +48,19 @@ func buildRPM(r vm.Runner, p *profile.Profile, revision, te, fc string) (string,
 	if err := r.WriteFile(pkg+"/"+app+".fc", fc); err != nil {
 		return "", err
 	}
+	// REMOVE any pre-existing build output before compiling, and force the rebuild.
+	// `make <app>.pp` is timestamp-driven: a privileged exercise could pre-create
+	// /tmp/hardener/<app>/pkg/<app>.pp (and the intermediate tmp/ artifacts) with a
+	// FUTURE mtime, so make would consider the target up to date and skip
+	// compilation — packaging attacker-supplied policy bytes while the RPM and the
+	// verdict attest the verified .te/.fc we just wrote (review finding — round 68).
+	// Deleting the outputs makes the rebuild unconditional regardless of clock skew.
 	script := fmt.Sprintf(`set -e
 mkdir -p ~/rpmbuild/{SOURCES,SPECS}
 cd /tmp/hardener/%[1]s/pkg
+sudo rm -rf tmp %[1]s.pp %[1]s.mod %[1]s.mod.fc
 sudo make -f /usr/share/selinux/devel/Makefile %[1]s.pp
+test -f %[1]s.pp
 cp /tmp/hardener/%[1]s/pkg/%[1]s.pp ~/rpmbuild/SOURCES/
 cp /tmp/hardener/%[1]s/pkg/%[1]s.fc ~/rpmbuild/SOURCES/
 cp /tmp/hardener/%[1]s/%[1]s-selinux.spec ~/rpmbuild/SPECS/

@@ -1236,6 +1236,28 @@ type runInfo struct {
 // captured by byte offset into audit.log — ausearch time filtering proved
 // unreliable (returned "no matches" with matching records present).
 func exercise(r vm.Runner, t *target.Target, dom string) ([]avc.Denial, bool, runInfo, error) {
+	// ORDERED START BARRIER, taken BEFORE the offset. The caller loads our policy
+	// module and edits the permissive list immediately before calling us, and those
+	// legitimate operations emit MAC_POLICY_LOAD records that auditd may not have
+	// appended yet. Taking the offset first would let them land AFTER it, inside our
+	// window, where auditPolicyReloaded reads them as a transient policy swap and
+	// fails a valid run (review finding — round 68). Emit a USER record now and wait
+	// for it to appear: once written, auditd has necessarily flushed everything
+	// queued before it, so the offset taken afterward starts strictly past our own
+	// setup. Best-effort — if auditctl -m is unavailable the END barrier still fails
+	// closed later, so this only ever narrows the window, never widens it.
+	startSentinel := fmt.Sprintf("hardener-start-%s", policy.SafeName(t.Name))
+	if _, serr := r.Run("sudo auditctl -m " + vm.ShellQuote(startSentinel)); serr == nil {
+		for i := 0; i < 10; i++ {
+			n, gerr := r.Run("sudo grep -Fc " + vm.ShellQuote(startSentinel) + " /var/log/audit/audit.log 2>/dev/null || true")
+			if gerr != nil {
+				continue
+			}
+			if s := strings.TrimSpace(n); s != "" && s != "0" {
+				break
+			}
+		}
+	}
 	pre, err := r.Run("sudo stat -c '%s %i' /var/log/audit/audit.log")
 	if err != nil {
 		return nil, false, runInfo{}, fmt.Errorf("audit log offset: %w", err)

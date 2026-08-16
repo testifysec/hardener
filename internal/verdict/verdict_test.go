@@ -149,3 +149,29 @@ func TestCollisionsRequireAcceptance(t *testing.T) {
 		t.Errorf("an accepted collision must disclose as pass-with-exceptions, got %q", v)
 	}
 }
+
+// Round 68: the ExerciseEnforcing gate was populated from res.ExerciseOK alone,
+// so a run whose ENFORCEMENT verification failed but whose exercise happened to
+// succeed serialized the gate as true — the signed predicate advertised
+// "exercised under enforcement" for policy that never reached a verified
+// enforcing state. The gate must reflect BOTH, and both inputs must be
+// serialized separately. (review finding)
+func TestExerciseEnforcingGateRequiresBothStates(t *testing.T) {
+	r := passingResult()
+	r.EnforceOK = false // enforcement verification FAILED; exercise still ok
+	g := Build(r, Env{}, nil).Predicate.Gates
+	if g.ExerciseEnforcing {
+		t.Error("ExerciseEnforcing must be false when enforcement was not proven")
+	}
+	if !g.ExerciseSucceeded {
+		t.Error("ExerciseSucceeded must still report the exercise result")
+	}
+	if g.EnforcementProven {
+		t.Error("EnforcementProven must be false when EnforceOK is false")
+	}
+	// The happy path still reports the gate as passing.
+	ok := Build(passingResult(), Env{}, nil).Predicate.Gates
+	if !ok.ExerciseEnforcing || !ok.ExerciseSucceeded || !ok.EnforcementProven {
+		t.Errorf("a fully passing run must set all three gate fields, got %+v", ok)
+	}
+}
