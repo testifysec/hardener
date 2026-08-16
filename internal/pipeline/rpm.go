@@ -342,9 +342,15 @@ _rollback() {
         # Fresh install: remove the REJECTED module, then restore base file labels.
         # VERIFY removal — suppressing the error let a partially-loaded rejected
         # module stay active, confining the app under UNVERIFIED policy (review
-        # finding). If it is still present, say so loudly with the manual fix.
+        # finding). CAPTURE the module list first: piping semodule -l straight into
+        # grep is fail-OPEN — if the enumeration fails, grep finds no match and we
+        # would treat an UNVERIFIABLE rejected module as removed (review finding).
+        # semodule -l always lists many base modules, so empty output is a failure.
         semodule -r %[1]s 2>/dev/null || :
-        if semodule -l 2>/dev/null | grep -qE "^%[1]s([[:space:]]|$)"; then
+        _ml="$(semodule -l 2>/dev/null)"
+        if [ -z "$_ml" ]; then
+            echo "CRITICAL: cannot verify removal of the rejected %[1]s policy module (semodule -l failed); it may still be loaded and confining the app under UNVERIFIED policy. Remove it manually: sudo semodule -r %[1]s" >&2
+        elif printf '%%s\n' "$_ml" | grep -qE "^%[1]s([[:space:]]|$)"; then
             echo "CRITICAL: the rejected %[1]s policy module is still loaded after rollback; the application may be confined by UNVERIFIED policy. Remove it manually: sudo semodule -r %[1]s" >&2
         fi
 %[6]s
