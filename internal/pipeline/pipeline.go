@@ -434,10 +434,14 @@ func Run(r vm.Runner, t *target.Target, opts Options) *Result {
 	for round := 1; round <= opts.MaxRounds; round++ {
 		te := policy.GenerateTE(p) + policy.RenderRefinedSection(p, extraRules)
 		fc := policy.GenerateFC(p)
+		// Set BEFORE the call: installPolicy loads the module before its own
+		// relabel/port validation, so a validation error there still left state on
+		// the verifier — cleanup must fire (review finding). Cleanup is idempotent,
+		// so arming it even if the compile fails before load is harmless.
+		moduleInstalled = true
 		if err := installPolicy(r, p, te, fc); err != nil {
 			return fail(fmt.Sprintf("policy-install round %d", round), err)
 		}
-		moduleInstalled = true
 		res.FinalTE, res.FinalFC = te, fc
 
 		opts.Log("[%s] observe round %d (permissive domain)", t.Name, round)
@@ -513,10 +517,10 @@ func Run(r vm.Runner, t *target.Target, opts Options) *Result {
 	// we already know (review finding).
 	finalTE := policy.GenerateTE(p) + policy.RenderRefinedSection(p, extraRules)
 	finalFC := policy.GenerateFC(p)
+	moduleInstalled = true
 	if err := installPolicy(r, p, finalTE, finalFC); err != nil {
 		return fail("final-policy-install", err)
 	}
-	moduleInstalled = true
 	res.FinalTE, res.FinalFC = finalTE, finalFC
 
 	// The verifier itself must still be trustworthy after running the
@@ -604,10 +608,10 @@ func Run(r vm.Runner, t *target.Target, opts Options) *Result {
 		opts.Log("[%s] enforcing attempt %d had %d residual denials — refining and retrying", t.Name, attempt, len(denials))
 		te := policy.GenerateTE(p) + policy.RenderRefinedSection(p, extraRules)
 		fc := policy.GenerateFC(p)
+		moduleInstalled = true
 		if err := installPolicy(r, p, te, fc); err != nil {
 			return fail("policy-install (enforce refinement)", err)
 		}
-		moduleInstalled = true
 		res.FinalTE, res.FinalFC = te, fc
 	}
 
@@ -997,11 +1001,16 @@ func exercise(r vm.Runner, t *target.Target, dom string) ([]avc.Denial, bool, ru
 		// exercise, so we cannot bind a single executed image.
 		if exOK && run.ExePath != "" {
 			after := captureRunInfo(r, t.Unit)
-			switch {
-			case after.ExePath == "":
-				return nil, false, run, fmt.Errorf(
-					"the exercised process (%s) exited during the scenario — cannot confirm the same image ran throughout; hardener binds long-running confined services, not Type=oneshot workloads", run.ExePath)
-			case after.ExePath != run.ExePath || after.ExeDigest != run.ExeDigest || labelType(after.Label) != labelType(run.Label):
+			if after.ExePath != run.ExePath || after.ExeDigest != run.ExeDigest || labelType(after.Label) != labelType(run.Label) {
+				// STOP the unit before returning. A re-exec'd malicious process is
+				// still running here; returning straight to the caller (which then
+				// removes the SELinux module in failure cleanup) would leave that
+				// process alive AND unconfined (review finding). Stop it first.
+				_, _ = r.Run(fmt.Sprintf("sudo systemctl stop %s 2>/dev/null; true", t.Unit))
+				if after.ExePath == "" {
+					return nil, false, run, fmt.Errorf(
+						"the exercised process (%s) exited during the scenario — cannot confirm the same image ran throughout; hardener binds long-running confined services, not Type=oneshot workloads", run.ExePath)
+				}
 				return nil, false, run, fmt.Errorf(
 					"the exercised process changed identity mid-run (before exe=%s sha=%s label=%s; after exe=%s sha=%s label=%s) — the verdict cannot bind a single executed image",
 					run.ExePath, run.ExeDigest, run.Label, after.ExePath, after.ExeDigest, after.Label)

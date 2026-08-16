@@ -240,9 +240,15 @@ func BuildOrErr(res *pipeline.Result, env Env, extra []Subject) (Statement, erro
 	// or the entrypoint bytes — not only the .te/.fc policy text. Otherwise
 	// the attestation certifies a policy with no link to what gets installed.
 	if p.Verdict != "fail" {
-		hasArtifact := len(res.EntrypointDigests) > 0 || len(extra) > 0
+		// The artifact must be AUTHORITATIVE — the exercised entrypoint bytes or
+		// the built RPM — not merely "some caller-provided extra subject". Keying
+		// off len(extra) let an unrelated subject with a valid digest satisfy the
+		// requirement and produce a passing attestation for a policy bound to
+		// nothing that was exercised (review finding). The RPM, when produced, is
+		// itself validated by the RPMPath block below.
+		hasArtifact := len(res.EntrypointDigests) > 0 || res.RPMPath != ""
 		if !hasArtifact {
-			return Statement{}, fmt.Errorf("passing verdict has no artifact subject (RPM or entrypoint bytes); refusing to attest a policy bound to nothing exercised")
+			return Statement{}, fmt.Errorf("passing verdict has no authoritative artifact subject (built RPM or exercised entrypoint bytes); refusing to attest a policy bound to nothing exercised")
 		}
 		// Whenever an RPM was actually produced, it MUST be among the subjects.
 		// The distributed package (compiled policy + %post scriptlets) is what
