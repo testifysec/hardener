@@ -78,3 +78,23 @@ func TestExerciseEmitsAuditSentinelAndSkipsFallbackWhenFound(t *testing.T) {
 		t.Error("exercise must emit an ordered audit sentinel (auditctl -m hardener-barrier-...)")
 	}
 }
+
+// A same-NAME module content replacement (a broader policy swapped in under the
+// app's own module name) leaves the module NAME set unchanged, so moduleNameSet
+// misses it. recheck also compares the loaded module's CONTENT digest against
+// what was last installed; a drift means the enforced policy no longer matches
+// FinalTE/the RPM and must fail closed. (review finding — round 57)
+func TestRecheckFailsOnSameNameModuleContentSwap(t *testing.T) {
+	f := passingRunner()
+	good := strings.Repeat("a", 64) + "  -"
+	bad := strings.Repeat("b", 64) + "  -"
+	// Two installs (observe + final) capture 'good'; the next content probe (a
+	// recheck) sees 'bad' → same-name content swap detected.
+	f.seq = map[string][]string{
+		"active/modules": {good, good, bad},
+	}
+	res := Run(f, testTarget(), Options{MaxRounds: 2})
+	if res.FailureReason == "" || !strings.Contains(res.FailureReason, "module content changed") {
+		t.Fatalf("a same-name module content swap must fail closed, got %q", res.FailureReason)
+	}
+}

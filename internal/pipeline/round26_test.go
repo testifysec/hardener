@@ -57,6 +57,7 @@ func TestExerciseToleratesSameIdentityRestart(t *testing.T) {
 		"stat -c '%s'":              "0",
 		"stat -c '%i'":              "4242",
 		"auditctl -s":               "enabled 1 lost 0 backlog 0",
+		"grep -Fc":                  "1",
 		"is-active widget.service":  "inactive",
 		"systemctl show -p MainPID": same,
 	}}
@@ -117,6 +118,7 @@ func TestExerciseFailsClosedOnAuditLoss(t *testing.T) {
 			"stat -c '%s %i'":           "0 4242",
 			"stat -c '%s'":              "0",
 			"stat -c '%i'":              "4242",
+			"grep -Fc":                  "1",
 			"is-active widget.service":  "inactive",
 			"systemctl show -p MainPID": "LABEL:system_u:system_r:widget_t:s0\nEXE:/opt/widget/bin/widgetd\nEXESHA:" + strings.Repeat("ab", 32),
 		},
@@ -342,6 +344,7 @@ func TestExerciseFailsClosedOnSameInodeTruncation(t *testing.T) {
 		"stat -c '%i'":              "4242",     // inode unchanged post-read
 		"stat -c '%s'":              "10",       // size shrank 100 -> 10 (truncated)
 		"auditctl -s":               "enabled 1 lost 0 backlog 0",
+		"grep -Fc":                  "1",
 		"is-active widget.service":  "inactive",
 		"systemctl show -p MainPID": "LABEL:system_u:system_r:widget_t:s0\nEXE:/opt/widget/bin/widgetd\nEXESHA:" + strings.Repeat("ab", 32),
 	}}
@@ -501,9 +504,11 @@ func TestRunFailsWhenRpmbuildWroteNothing(t *testing.T) {
 	}
 }
 
-// Round 44: backlog==0 is not a write barrier — auditd may still be appending.
-// exercise() must wait for the log size to stabilize; a still-growing log fails.
-func TestExerciseFailsClosedWhenAuditLogKeepsGrowing(t *testing.T) {
+// Round 57: backlog==0 is not a write barrier, and the ordered SENTINEL is now
+// the ONLY barrier — the racy size-stabilization fallback was removed. If the
+// sentinel cannot be established (it never appears in the log), exercise() must
+// FAIL CLOSED rather than read a possibly-incomplete window.
+func TestExerciseFailsClosedWhenSentinelNeverAppears(t *testing.T) {
 	tgt := &target.Target{
 		Name: "widget", Unit: "widget.service", Install: "true",
 		Exercise: "true", Executables: []string{"/opt/widget/bin/widgetd"},
@@ -512,17 +517,15 @@ func TestExerciseFailsClosedWhenAuditLogKeepsGrowing(t *testing.T) {
 		responses: map[string]string{
 			"stat -c '%s %i'":           "0 4242",
 			"stat -c '%i'":              "4242",
+			"stat -c '%s'":              "0",
 			"auditctl -s":               "enabled 1 lost 0 backlog 0",
+			"grep -Fc":                  "0", // auditctl -m "succeeds" but the sentinel never lands
 			"is-active widget.service":  "inactive",
 			"systemctl show -p MainPID": "LABEL:system_u:system_r:widget_t:s0\nEXE:/opt/widget/bin/widgetd\nEXESHA:" + strings.Repeat("ab", 32),
 		},
-		seq: map[string][]string{
-			// size never repeats across the 8 probes → never stabilizes.
-			"stat -c '%s'": {"10", "20", "30", "40", "50", "60", "70", "80"},
-		},
 	}
-	if _, _, _, err := exercise(f, tgt, "widget_t"); err == nil || !strings.Contains(err.Error(), "did not stabilize") {
-		t.Fatalf("a still-growing audit log must fail closed, got %v", err)
+	if _, _, _, err := exercise(f, tgt, "widget_t"); err == nil || !strings.Contains(err.Error(), "sentinel could not be established") {
+		t.Fatalf("an unestablished audit sentinel must fail closed, got %v", err)
 	}
 }
 
@@ -550,13 +553,11 @@ func TestExerciseFailsClosedWhenAuditLogGrewDuringRead(t *testing.T) {
 		responses: map[string]string{
 			"stat -c '%s %i'":           "100 4242", // pre-tail size 100
 			"stat -c '%i'":              "4242",
+			"stat -c '%s'":              "200", // post-read size grew 100 -> 200
 			"auditctl -s":               "enabled 1 lost 0 backlog 0",
+			"grep -Fc":                  "1",
 			"is-active widget.service":  "inactive",
 			"systemctl show -p MainPID": "LABEL:system_u:system_r:widget_t:s0\nEXE:/opt/widget/bin/widgetd\nEXESHA:" + strings.Repeat("ab", 32),
-		},
-		seq: map[string][]string{
-			// barrier stabilizes at 100, then the post-read size is 200 (grew).
-			"stat -c '%s'": {"100", "100", "200"},
 		},
 	}
 	if _, _, _, err := exercise(f, tgt, "widget_t"); err == nil || !strings.Contains(err.Error(), "changed size during read") {
