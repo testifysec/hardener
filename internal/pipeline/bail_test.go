@@ -23,10 +23,17 @@ func (f *fakeRunner) Run(script string) (string, error) {
 			return "", errors.New("exit status 1")
 		}
 	}
+	// Longest (most specific) matching key wins — deterministic, and lets a
+	// command that contains several keys (e.g. the MainPID capture also runs
+	// sha256sum) resolve to the intended response.
+	best, bestOut := "", ""
 	for pattern, out := range f.responses {
-		if strings.Contains(script, pattern) {
-			return out, nil
+		if strings.Contains(script, pattern) && len(pattern) > len(best) {
+			best, bestOut = pattern, out
 		}
+	}
+	if best != "" {
+		return bestOut, nil
 	}
 	return "", nil
 }

@@ -82,8 +82,24 @@ func GenerateSpec(p *profile.Profile, revision string) string {
 		fmt.Fprintf(&ports,
 			"if ! { semanage port -a -t %[1]s -p %[2]s %[3]d 2>/dev/null || semanage port -l | awk -v t=%[1]s -v p=%[2]s '$1==t && $2==p' | grep -qw %[3]d; }; then echo \"ERROR: port %[3]d/%[2]s could not be assigned to %[1]s (already claimed by another SELinux type?); refusing to leave %[1]s bound to an unintended port type\" >&2; exit 1; fi\n",
 			policy.PortType(p.Name), port.Proto, port.Port)
-		fmt.Fprintf(&portsDel, "    semanage port -d -t %s -p %s %d 2>/dev/null || :\n",
+		// Removal is best-effort but OBSERVABLE — a swallowed `|| :` hid a
+		// half-removed policy on uninstall (review finding).
+		fmt.Fprintf(&portsDel, "semanage port -d -t %[1]s -p %[2]s %[3]d 2>/dev/null || echo \"warning: could not remove port %[3]d/%[2]s mapping for %[1]s\" >&2\n",
 			policy.PortType(p.Name), port.Proto, port.Port)
+	}
+	// After the module is removed on uninstall, the app's files still carry the
+	// now-UNDEFINED app types (<app>_exec_t, etc.) — leaving them labeled makes
+	// the files inaccessible. Restore base labels via restorecon (the fc is gone
+	// by then, so restorecon assigns the distro type). Messages name only the
+	// app (SafeName), never a raw path, so uninstall cannot inject shell.
+	var restore strings.Builder
+	for _, root := range RelabelRoots(p) {
+		fmt.Fprintf(&restore, "restorecon -RF -- %s 2>/dev/null || echo 'warning: could not restore some %s file labels after removal' >&2\n",
+			vm.ShellQuote(root), app)
+	}
+	for _, exe := range p.Executables {
+		fmt.Fprintf(&restore, "restorecon -F -- %s 2>/dev/null || echo 'warning: could not restore a %s entrypoint label after removal' >&2\n",
+			vm.ShellQuote(exe), app)
 	}
 	return fmt.Sprintf(`Name:           %[1]s-selinux
 Version:        1.0.0
@@ -95,7 +111,7 @@ Source0:        %[1]s.pp
 Source1:        %[1]s.fc
 Requires:       policycoreutils
 Requires(post): policycoreutils policycoreutils-python-utils
-Requires(postun): policycoreutils
+Requires(postun): policycoreutils policycoreutils-python-utils
 
 %%description
 Machine-generated least-privilege SELinux policy module confining %[1]s.
@@ -107,20 +123,32 @@ install -D -m 0644 %%{SOURCE0} %%{buildroot}%%{_datadir}/selinux/packages/%[1]s.
 install -D -m 0644 %%{SOURCE1} %%{buildroot}%%{_datadir}/selinux/hardener/%[1]s.fc
 
 %%post
-# Fail closed: a package that "installs" without loading its policy leaves
-# the application unconfined while looking hardened.
+# Fail closed WITH rollback: loading the module then failing entrypoint/port
+# validation must not leave the module and partial port mappings installed after
+# a reported install failure (review finding). A trap undoes them on any early
+# exit; the flag disarms it only once every step has succeeded.
+_ok=0
+_rollback() {
+    [ "$_ok" = 1 ] && return 0
+%[4]s    semodule -r %[1]s 2>/dev/null || :
+}
+trap _rollback EXIT
 if ! semodule -i %%{_datadir}/selinux/packages/%[1]s.pp; then
     echo "ERROR: semodule failed to load the %[1]s policy module; the application is NOT confined" >&2
     exit 1
 fi
-%[2]s%[3]s
+%[2]s%[3]s_ok=1
+
 %%postun
 if [ $1 -eq 0 ]; then
-%[4]s    semodule -r %[1]s 2>/dev/null || :
+%[4]s    semodule -r %[1]s 2>/dev/null || echo "warning: could not remove the %[1]s policy module" >&2
+    # Restore base file labels now that the app types are undefined, or the
+    # files would be left with a dangling label and become inaccessible.
+%[6]s
 fi
 
 %%files
 %%{_datadir}/selinux/packages/%[1]s.pp
 %%{_datadir}/selinux/hardener/%[1]s.fc
-`, app, relabel.String(), ports.String(), portsDel.String(), revision)
+`, app, relabel.String(), ports.String(), portsDel.String(), revision, restore.String())
 }

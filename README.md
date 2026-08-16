@@ -252,15 +252,20 @@ host-shipped `*.pem`, and never the downloaded `cilock` checking itself. Run the
 verifier only once both pass:
 
 ```bash
-# (a) integrity — the pulled verifier matches its signed checksum
-sha256sum -c <rel>.cilock-linux-amd64.sha256
-# (b) provenance — verify <rel>.cilock-linux-amd64.sha256.dsse was signed by THIS
+# (a) provenance — verify <rel>.cilock-linux-amd64.sha256.dsse was signed by THIS
 #     release identity, anchoring on roots from the INDEPENDENT channel above
-#     (NOT the host-shipped *.pem, which are convenience copies to cross-check):
+#     (NOT the host-shipped *.pem). This authenticates the checksum bytes that
+#     live INSIDE the envelope:
 #       issuer   https://token.actions.githubusercontent.com
 #       identity https://github.com/testifysec/judge/.github/workflows/release-hardener.yml@refs/tags/hardener-v*
-# Reject the release if either check fails, or if the host-shipped roots do not
-# match the independently-obtained ones.
+# (b) integrity — check the binary against the DSSE's SIGNED payload, not the
+#     loose .sha256 file. A host that swaps the binary also swaps the loose
+#     .sha256 but cannot forge the signed payload, so bind to the payload:
+jq -r .payload <rel>.cilock-linux-amd64.sha256.dsse | base64 -d > verified.sha256
+sha256sum -c verified.sha256
+# The loose <rel>.cilock-linux-amd64.sha256 MUST byte-match verified.sha256.
+# Reject the release if the DSSE fails, the checksums differ, or the host-shipped
+# roots do not match the independently-obtained ones.
 ```
 
 **Step 2 — authenticate the attestation archive BEFORE extracting it.** The
@@ -270,12 +275,13 @@ path-traversal entry) attack your machine before `cilock` ever runs. Verify its
 signed checksum, then extract into an isolated empty directory with safe flags:
 
 ```bash
-# integrity + provenance of the archive itself (same signed-checksum pattern and
-# independent root anchor as the verifier in Step 1)
-sha256sum -c <rel>.intoto.tgz.sha256
-#   then verify <rel>.intoto.tgz.sha256.dsse against the release identity.
-# extract into a fresh dir; GNU tar strips a leading '/' and rejects '..', and
-# these flags drop ownership/permission surprises. Cap the size first.
+# provenance + integrity of the archive itself (same DSSE-payload binding as the
+# verifier in Step 1): verify the DSSE against the release identity, then check
+# the archive against the SIGNED payload — not the loose .sha256.
+jq -r .payload <rel>.intoto.tgz.sha256.dsse | base64 -d > verified-archive.sha256
+sha256sum -c verified-archive.sha256
+# extract only after that passes; GNU tar strips a leading '/' and rejects '..',
+# and these flags drop ownership/permission surprises. Cap the size first.
 test "$(stat -c%s <rel>.intoto.tgz)" -lt 10485760 || { echo "archive too large" >&2; exit 1; }
 mkdir attestations
 tar --no-same-owner --no-same-permissions -xzf <rel>.intoto.tgz -C attestations

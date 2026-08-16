@@ -11,7 +11,7 @@ func passingRunner() *fakeRunner {
 	return &fakeRunner{responses: map[string]string{
 		"getenforce":                "Enforcing\nactive",
 		"stat -c '%s %i'":           "0 4242",
-		"MainPID":                   "system_u:system_r:widget_t:s0",
+		"systemctl show -p MainPID": "LABEL:system_u:system_r:widget_t:s0\nEXE:/opt/widget/bin/widgetd\nEXESHA:abababababababababababababababababababababababababababababababab",
 		"command -v sesearch":       "TOOLS_OK",
 		"sesearch -A -s init_t":     "allow init_t bin_t:file execute;",
 		"sha256sum":                 "abababababababababababababababababababababababababababababababab  /home/u/rpmbuild/RPMS/noarch/widget-selinux-1.0.0-1.el9.noarch.rpm",
