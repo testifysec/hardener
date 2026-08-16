@@ -1,11 +1,47 @@
 package target
 
 import (
+	"fmt"
 	"os"
 	"path/filepath"
 	"strings"
 	"testing"
 )
+
+const portManifest = `name: widget
+install: "true"
+unit: widget.service
+exercise: "true"
+executables:
+  - /opt/widget/bin/widgetd
+ports:
+  - { proto: %s, port: %d }
+`
+
+// Round 17: port proto/number are interpolated into root %post semanage
+// commands, so an unvalidated protocol could smuggle shell metacharacters and
+// an out-of-range port is meaningless. Load must reject both.
+func TestLoadValidatesPorts(t *testing.T) {
+	bad := []struct {
+		proto string
+		port  int
+	}{
+		{"sctp", 80}, {"tcp; rm -rf /", 80}, {"tcp", 0}, {"udp", 70000}, {"tcp", -1},
+	}
+	for _, b := range bad {
+		if _, err := Load(write(t, fmt.Sprintf(portManifest, b.proto, b.port))); err == nil {
+			t.Errorf("port %q/%d must be rejected", b.proto, b.port)
+		}
+	}
+	for _, ok := range []struct {
+		proto string
+		port  int
+	}{{"tcp", 8443}, {"udp", 1}, {"tcp", 65535}} {
+		if _, err := Load(write(t, fmt.Sprintf(portManifest, ok.proto, ok.port))); err != nil {
+			t.Errorf("port %q/%d must load: %v", ok.proto, ok.port, err)
+		}
+	}
+}
 
 const validManifest = `name: widget
 install: "true"

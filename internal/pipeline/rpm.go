@@ -57,16 +57,30 @@ func GenerateSpec(p *profile.Profile, revision string) string {
 	// service unconfined (review finding). Paths are single-quoted so a manifest
 	// path can never inject shell into the customer's %post.
 	for _, exe := range p.Executables {
-		q := vm.ShellQuote(exe)
+		// Bind the path to a shell variable ONCE from its single-quoted literal,
+		// then reference "$_e" everywhere — including the error messages. The
+		// round-16 fix quoted the restorecon argument but still interpolated the
+		// raw path into double-quoted echo diagnostics, where $(...) in a
+		// manifest path would execute as root on relabel failure (review
+		// finding). Variable expansion does not re-evaluate the value, and
+		// printf '%%s' prints it literally.
 		fmt.Fprintf(&relabel,
-			"restorecon -F -- %[1]s || { echo \"ERROR: cannot label entrypoint %[2]s; the service would run unconfined\" >&2; exit 1; }\n"+
-				"_lbl=$(stat -c '%%C' -- %[1]s 2>/dev/null); case \"$_lbl\" in *:%[3]s:*) : ;; *) echo \"ERROR: entrypoint %[2]s is labeled '$_lbl', not %[3]s — a higher-priority file-context rule is overriding it; the service would run unconfined\" >&2; exit 1 ;; esac\n",
-			q, exe, execType)
+			"_e=%[1]s\n"+
+				"restorecon -F -- \"$_e\" || { printf 'ERROR: cannot label entrypoint %%s; the service would run unconfined\\n' \"$_e\" >&2; exit 1; }\n"+
+				"_lbl=$(stat -c '%%C' -- \"$_e\" 2>/dev/null); case \"$_lbl\" in *:%[2]s:*) : ;; *) printf 'ERROR: entrypoint %%s is labeled %%s, not %[2]s — a higher-priority file-context rule is overriding it; the service would run unconfined\\n' \"$_e\" \"$_lbl\" >&2; exit 1 ;; esac\n",
+			vm.ShellQuote(exe), execType)
 	}
 	var ports strings.Builder
 	var portsDel strings.Builder
 	for _, port := range p.Ports {
-		fmt.Fprintf(&ports, "semanage port -a -t %s -p %s %d 2>/dev/null || :\n",
+		// Fail CLOSED on the port label: `-a` succeeds on first install and
+		// fails on re-install (already defined) OR on a conflict (the port is
+		// claimed by ANOTHER type). Distinguish them by verifying the port is
+		// actually listed under our type — otherwise `|| :` silently left the
+		// service binding an unintended port type (review finding). proto/port
+		// are validated at manifest load, so they are safe to interpolate.
+		fmt.Fprintf(&ports,
+			"if ! { semanage port -a -t %[1]s -p %[2]s %[3]d 2>/dev/null || semanage port -l | awk -v t=%[1]s -v p=%[2]s '$1==t && $2==p' | grep -qw %[3]d; }; then echo \"ERROR: port %[3]d/%[2]s could not be assigned to %[1]s (already claimed by another SELinux type?); refusing to leave %[1]s bound to an unintended port type\" >&2; exit 1; fi\n",
 			policy.PortType(p.Name), port.Proto, port.Port)
 		fmt.Fprintf(&portsDel, "    semanage port -d -t %s -p %s %d 2>/dev/null || :\n",
 			policy.PortType(p.Name), port.Proto, port.Port)

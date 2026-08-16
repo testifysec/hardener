@@ -175,12 +175,15 @@ func Refine(p *profile.Profile, denials []avc.Denial) Refinement {
 			!allReadOnly(perms) {
 			reason = "self-modification of read-only program files: " + d.TargetType
 		}
-		// Foreign-type access defaults to review. A type that is neither ours,
-		// a port type, nor on the curated safe allowlist is an unknown grant —
-		// it must not fail open the way the finite blocklists did (a read of
-		// ssh_home_t would otherwise just become policy). (review finding)
+		// Foreign-type access defaults to review. A type that is neither ours
+		// nor on the curated safe allowlist is an unknown grant — it must not
+		// fail open the way the finite blocklists did (a read of ssh_home_t
+		// would otherwise just become policy). This INCLUDES foreign *_port_t
+		// types: the app's OWN port type is in `own` and stays unflagged, but a
+		// bind of a foreign port (ssh_port_t, unreserved_port_t) is a broad grant
+		// that must be reviewed, not auto-accepted (review finding — the blanket
+		// _port_t skip let those through). (review finding)
 		if reason == "" && !own[d.TargetType] && !isCapabilityClass(d.Class) &&
-			!strings.HasSuffix(d.TargetType, "_port_t") &&
 			!(safeForeignTypes[d.TargetType] && routineForeignAccess(d.TargetType, perms)) {
 			reason = "foreign type access requiring review: " + d.TargetType
 		}
