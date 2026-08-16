@@ -65,6 +65,23 @@ type Refinement struct {
 // of them is a W^X violation worth review.
 var writableOwnedSuffixes = []string{"_var_lib_t", "_log_t", "_runtime_t", "_tmp_t", "_cache_t"}
 
+// unionPerms returns the sorted, de-duplicated union of two permission sets.
+func unionPerms(a, b []string) []string {
+	seen := map[string]bool{}
+	for _, p := range a {
+		seen[p] = true
+	}
+	for _, p := range b {
+		seen[p] = true
+	}
+	out := make([]string, 0, len(seen))
+	for p := range seen {
+		out = append(out, p)
+	}
+	sort.Strings(out)
+	return out
+}
+
 // isWritableOwnedType reports whether t is one of the app's writable data types.
 func isWritableOwnedType(t string) bool {
 	for _, s := range writableOwnedSuffixes {
@@ -184,9 +201,13 @@ func Refine(p *profile.Profile, denials []avc.Denial) Refinement {
 		perms := d.Perms
 		// Executing a helper requires the whole read+exec set; granting only
 		// the observed perm makes each verification run surface one more
-		// (getattr → read → open → map), costing a round per permission.
+		// (getattr → read → open → map), costing a round per permission. UNION the
+		// canonical set with the observed perms — REPLACING them dropped any other
+		// observed permission (a `{ execute write }` denial lost `write`), hiding
+		// dangerous behavior from the self-modification/danger checks below and the
+		// signed result (review finding).
 		if d.Class == "file" && strings.HasSuffix(d.TargetType, "_exec_t") && hasPerm(perms, "execute") {
-			perms = []string{"execute", "execute_no_trans", "getattr", "map", "open", "read"}
+			perms = unionPerms(perms, []string{"execute", "execute_no_trans", "getattr", "map", "open", "read"})
 		}
 		rule := AllowRule{Source: dom, Target: d.TargetType, Class: d.Class, Perms: perms}
 		reason := dangerReason(rule)

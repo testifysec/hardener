@@ -132,3 +132,25 @@ func TestProcessPermsAreAllowlisted(t *testing.T) {
 		t.Errorf("benign process perms must not be flagged: %+v", res.Flags)
 	}
 }
+
+// Round 43: the canonical exec-set expansion must UNION with observed perms, not
+// replace them — a `{ execute write }` denial on an _exec_t target must keep
+// `write` so the self-modification check still fires.
+func TestCanonicalExecUnionsObservedPerms(t *testing.T) {
+	p := widgetProfile()
+	ds := []avc.Denial{{
+		SourceType: "widget_t", TargetType: "widget_exec_t", Class: "file",
+		Perms: []string{"execute", "write"},
+	}}
+	res := Refine(p, ds)
+	// write to the app's own exec_t is self-modification → must be flagged.
+	flagged := false
+	for _, f := range res.Flags {
+		if strings.Contains(f.Reason, "self-modification") {
+			flagged = true
+		}
+	}
+	if !flagged {
+		t.Errorf("write must survive the canonical-exec expansion and be flagged: %+v", res.Flags)
+	}
+}

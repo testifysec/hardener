@@ -23,7 +23,7 @@ func passingRunner() *fakeRunner {
 		"command -v sesearch":       "TOOLS_OK",
 		"sesearch -A -s init_t":     "allow init_t bin_t:file execute;",
 		"sha256sum":                 "abababababababababababababababababababababababababababababababab  /home/u/rpmbuild/RPMS/noarch/widget-selinux-1.0.0-1.el9.noarch.rpm",
-		"ls ~/rpmbuild/RPMS/noarch": "/home/u/rpmbuild/RPMS/noarch/widget-selinux-1.0.0-1.el9.noarch.rpm",
+		"rpmbuild -bb":              "Processing files...\nWrote: /home/u/rpmbuild/RPMS/noarch/widget-selinux-1.0.0-1.el9.noarch.rpm",
 	}}
 }
 

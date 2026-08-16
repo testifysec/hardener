@@ -913,7 +913,11 @@ sudo semodule -i %s.pp
 	// overlapping declared sub-paths (splunk's var/etc under its content root), so
 	// instead REJECT any LOCAL file-context customization that overlaps a declared
 	// root — that is the only thing that can silently override our labeling.
-	if local, err := r.Run("sudo semanage fcontext -C -l 2>/dev/null"); err == nil {
+	local, err := r.Run("sudo semanage fcontext -C -l 2>/dev/null")
+	if err != nil {
+		return fmt.Errorf("could not enumerate local file-context customizations (semanage fcontext -C -l) — refusing to sign without confirming no override overlaps our roots: %w", err)
+	}
+	{
 		for _, line := range strings.Split(local, "\n") {
 			f := strings.Fields(line)
 			if len(f) == 0 || !strings.HasPrefix(f[0], "/") {
@@ -1274,7 +1278,13 @@ func auditStatus(r vm.Runner) (enabled, lost, backlog int, ok bool) {
 		}
 		return -1
 	}
-	return find("enabled"), find("lost"), find("backlog"), true
+	en, lo, bl := find("enabled"), find("lost"), find("backlog")
+	// ok ONLY when all three required fields were actually present and valid
+	// (>= 0). A non-empty-but-incomplete `auditctl -s` was previously trusted, so
+	// an absent field became -1 — enabled=-1 slipped past the ==0 disabled check,
+	// backlog=-1 counted as drained, and lost=-1 disabled loss detection (review
+	// finding). Fail closed instead.
+	return en, lo, bl, en >= 0 && lo >= 0 && bl >= 0
 }
 
 // labelType extracts the SELinux type from a user:role:type:level context so a

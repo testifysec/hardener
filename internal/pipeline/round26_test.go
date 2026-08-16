@@ -468,3 +468,33 @@ func TestSpecPortDeleteUsesValidSyntax(t *testing.T) {
 		t.Errorf("spec must delete ports with `semanage port -d -p`:\n%s", spec)
 	}
 }
+
+// Round 43: an incomplete `auditctl -s` (missing lost/backlog) must NOT be
+// trusted — absent fields returned -1 and slipped past the enabled/backlog/loss
+// checks. exercise() must fail closed.
+func TestExerciseFailsClosedOnIncompleteAuditStatus(t *testing.T) {
+	tgt := &target.Target{
+		Name: "widget", Unit: "widget.service", Install: "true",
+		Exercise: "true", Executables: []string{"/opt/widget/bin/widgetd"},
+	}
+	// "enabled 1" only — lost and backlog absent.
+	f := &fakeRunner{responses: map[string]string{
+		"stat -c '%s %i'": "0 4242",
+		"stat -c '%i'":    "4242",
+		"auditctl -s":     "enabled 1",
+	}}
+	if _, _, _, err := exercise(f, tgt, "widget_t"); err == nil || !strings.Contains(err.Error(), "cannot query audit status") {
+		t.Fatalf("an incomplete auditctl -s must fail closed, got %v", err)
+	}
+}
+
+// Round 43: buildRPM must fail if rpmbuild produced no `Wrote:` line rather than
+// fall back to a stale wildcard match.
+func TestRunFailsWhenRpmbuildWroteNothing(t *testing.T) {
+	f := passingRunner()
+	f.responses["rpmbuild -bb"] = "Processing files... (no Wrote line)"
+	res := Run(f, testTarget(), Options{MaxRounds: 2})
+	if !strings.Contains(res.FailureReason, "could not determine the built RPM path") {
+		t.Errorf("a missing rpmbuild Wrote line must fail, got %q", res.FailureReason)
+	}
+}
