@@ -54,6 +54,7 @@ func TestExerciseToleratesSameIdentityRestart(t *testing.T) {
 	same := "LABEL:system_u:system_r:widget_t:s0\nEXE:/opt/widget/bin/widgetd\nEXESHA:" + strings.Repeat("ab", 32)
 	f := &fakeRunner{responses: map[string]string{
 		"stat -c '%s %i'":           "0 4242",
+		"stat -c '%s'":              "0",
 		"stat -c '%i'":              "4242",
 		"auditctl -s":               "enabled 1 lost 0 backlog 0",
 		"is-active widget.service":  "inactive",
@@ -114,6 +115,7 @@ func TestExerciseFailsClosedOnAuditLoss(t *testing.T) {
 	f := &fakeRunner{
 		responses: map[string]string{
 			"stat -c '%s %i'":           "0 4242",
+			"stat -c '%s'":              "0",
 			"stat -c '%i'":              "4242",
 			"is-active widget.service":  "inactive",
 			"systemctl show -p MainPID": "LABEL:system_u:system_r:widget_t:s0\nEXE:/opt/widget/bin/widgetd\nEXESHA:" + strings.Repeat("ab", 32),
@@ -496,5 +498,30 @@ func TestRunFailsWhenRpmbuildWroteNothing(t *testing.T) {
 	res := Run(f, testTarget(), Options{MaxRounds: 2})
 	if !strings.Contains(res.FailureReason, "could not determine the built RPM path") {
 		t.Errorf("a missing rpmbuild Wrote line must fail, got %q", res.FailureReason)
+	}
+}
+
+// Round 44: backlog==0 is not a write barrier — auditd may still be appending.
+// exercise() must wait for the log size to stabilize; a still-growing log fails.
+func TestExerciseFailsClosedWhenAuditLogKeepsGrowing(t *testing.T) {
+	tgt := &target.Target{
+		Name: "widget", Unit: "widget.service", Install: "true",
+		Exercise: "true", Executables: []string{"/opt/widget/bin/widgetd"},
+	}
+	f := &fakeRunner{
+		responses: map[string]string{
+			"stat -c '%s %i'":           "0 4242",
+			"stat -c '%i'":              "4242",
+			"auditctl -s":               "enabled 1 lost 0 backlog 0",
+			"is-active widget.service":  "inactive",
+			"systemctl show -p MainPID": "LABEL:system_u:system_r:widget_t:s0\nEXE:/opt/widget/bin/widgetd\nEXESHA:" + strings.Repeat("ab", 32),
+		},
+		seq: map[string][]string{
+			// size never repeats across the 8 probes → never stabilizes.
+			"stat -c '%s'": {"10", "20", "30", "40", "50", "60", "70", "80"},
+		},
+	}
+	if _, _, _, err := exercise(f, tgt, "widget_t"); err == nil || !strings.Contains(err.Error(), "did not stabilize") {
+		t.Fatalf("a still-growing audit log must fail closed, got %v", err)
 	}
 }

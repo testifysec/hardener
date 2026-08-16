@@ -12,6 +12,10 @@ const goodSHA = "abababababababababababababababababababababababababababababababa
 // attestation whose subject digest is garbage binds to nothing (review finding).
 func TestBuildRejectsMalformedDigest(t *testing.T) {
 	r := passingResult()
+	// The extra must BE the built RPM (name+digest match), so set RPMPath/RPMSHA256
+	// to the malformed value — the digest validation is what we're testing.
+	r.RPMPath = "/x/app.rpm"
+	r.RPMSHA256 = "ab12"
 	_, err := BuildOrErr(r, Env{}, []Subject{{Name: "app.rpm", SHA256: "ab12"}})
 	if err == nil {
 		t.Fatal("short/malformed digest must be rejected")
@@ -25,6 +29,8 @@ func TestBuildRejectsMalformedDigest(t *testing.T) {
 func TestBuildRequiresAValidSubject(t *testing.T) {
 	r := passingResult()
 	// The RPM subject name must match the produced RPM (res.RPMPath basename).
+	r.RPMPath = "/home/u/rpmbuild/RPMS/noarch/widget-selinux-1.0.0-1.el9.noarch.rpm"
+	r.RPMSHA256 = goodSHA
 	st, err := BuildOrErr(r, Env{}, []Subject{{Name: "widget-selinux-1.0.0-1.el9.noarch.rpm", SHA256: goodSHA}})
 	if err != nil {
 		t.Fatalf("valid digest must be accepted: %v", err)
@@ -177,7 +183,9 @@ func TestVerdictFailsOnUndeclaredWithoutFatal(t *testing.T) {
 	// finding on the earlier version of this test).
 	r.Party = "third"
 	r.Target.Party = "third"
-	st, err = BuildOrErr(r, Env{}, []Subject{{Name: "x", SHA256: goodSHA}})
+	// No extra — the entrypoint digests in passingResult() satisfy the artifact
+	// requirement (an unrelated extra is now rejected).
+	st, err = BuildOrErr(r, Env{}, nil)
 	if err != nil {
 		t.Fatalf("third-party build must not error: %v", err)
 	}
@@ -232,5 +240,29 @@ func TestVerdictRejectsUnrelatedExtraWithoutArtifact(t *testing.T) {
 	r.EntrypointDigests = map[string]string{"/opt/widget/bin/widgetd": goodSHA}
 	if _, err := BuildOrErr(r, Env{}, nil); err != nil {
 		t.Errorf("exercised entrypoint bytes must satisfy the artifact requirement: %v", err)
+	}
+}
+
+// Round 44: an unrelated extra (not the built RPM) must be rejected even when an
+// authoritative entrypoint artifact exists, and duplicate subject names too.
+func TestVerdictRejectsUnrelatedAndDuplicateExtras(t *testing.T) {
+	r := passingResult()
+	r.RPMPath = "" // no RPM → NO extra is authoritative
+	if _, err := BuildOrErr(r, Env{}, []Subject{{Name: "unrelated.rpm", SHA256: goodSHA}}); err == nil {
+		t.Error("an extra with no built RPM must be rejected")
+	}
+	// With an RPM, an extra whose digest does not match the computed one is rejected.
+	r.RPMPath = "/x/widget-selinux-1.0.0-1.el9.noarch.rpm"
+	r.RPMSHA256 = goodSHA
+	wrong := "cd" + goodSHA[2:]
+	if _, err := BuildOrErr(r, Env{}, []Subject{{Name: "widget-selinux-1.0.0-1.el9.noarch.rpm", SHA256: wrong}}); err == nil {
+		t.Error("an extra whose digest != the computed RPM digest must be rejected")
+	}
+	// A duplicate RPM subject name is rejected.
+	if _, err := BuildOrErr(r, Env{}, []Subject{
+		{Name: "widget-selinux-1.0.0-1.el9.noarch.rpm", SHA256: goodSHA},
+		{Name: "widget-selinux-1.0.0-1.el9.noarch.rpm", SHA256: goodSHA},
+	}); err == nil {
+		t.Error("duplicate subject names must be rejected")
 	}
 }

@@ -1146,6 +1146,29 @@ func exercise(r vm.Runner, t *target.Target, dom string) ([]avc.Denial, bool, ru
 	if !backlogDrained {
 		return nil, exOK, run, fmt.Errorf("auditd backlog did not drain (or could not be confirmed) after the exercise — audit records may still be unwritten; re-run on a less loaded verifier")
 	}
+	// WRITE BARRIER. backlog==0 only means the kernel handed records to auditd —
+	// NOT that auditd finished APPENDING them to audit.log, so an immediate tail
+	// can still miss a pending AVC (review finding). The unit is stopped, so no new
+	// records are generated; wait (bounded) until the log SIZE stops growing across
+	// two consecutive stats, meaning auditd's writes have settled. Require two equal
+	// reads; fail closed if it never stabilizes.
+	sizeStable := false
+	prevSize := ""
+	for i := 0; i < 8; i++ {
+		s, err := r.Run("sudo stat -c '%s' /var/log/audit/audit.log")
+		if err != nil {
+			continue
+		}
+		s = strings.TrimSpace(s)
+		if s != "" && s == prevSize {
+			sizeStable = true
+			break
+		}
+		prevSize = s
+	}
+	if !sizeStable {
+		return nil, exOK, run, fmt.Errorf("audit log size did not stabilize after the exercise — auditd is still writing; re-run on a less loaded verifier")
+	}
 	// Fail closed on log rotation/truncation: a new inode or a shrunk file
 	// means our byte offset is stale and a plain tail would silently miss AVC
 	// records, reporting a false zero-denial pass (review finding).
