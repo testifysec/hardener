@@ -14,7 +14,7 @@ func passingRunner() *fakeRunner {
 		"MainPID":                   "system_u:system_r:widget_t:s0",
 		"command -v sesearch":       "TOOLS_OK",
 		"sesearch -A -s init_t":     "allow init_t bin_t:file execute;",
-		"sha256sum":                 "abc123  /home/u/rpmbuild/RPMS/noarch/widget-selinux-1.0.0-1.el9.noarch.rpm",
+		"sha256sum":                 "abababababababababababababababababababababababababababababababab  /home/u/rpmbuild/RPMS/noarch/widget-selinux-1.0.0-1.el9.noarch.rpm",
 		"ls ~/rpmbuild/RPMS/noarch": "/home/u/rpmbuild/RPMS/noarch/widget-selinux-1.0.0-1.el9.noarch.rpm",
 	}}
 }
@@ -47,7 +47,7 @@ func TestRPMBuildFailureFailsTheRun(t *testing.T) {
 
 // The generated spec must not suppress semodule failure in %post.
 func TestSpecFailsClosedOnSemodule(t *testing.T) {
-	spec := GenerateSpec(testTarget().Profile())
+	spec := GenerateSpec(testTarget().Profile(), "20260101000000")
 	if strings.Contains(spec, "semodule -i %{_datadir}/selinux/packages/widget.pp || :") {
 		t.Error("post scriptlet suppresses semodule failure — package would install unconfined")
 	}

@@ -73,15 +73,15 @@ func (s *SSH) WriteFile(path, content string) error {
 // containing a line equal to the delimiter would terminate it early and run
 // the remainder as shell — with passwordless sudo (review finding). base64's
 // alphabet has no shell metacharacters, so embedding it is safe; paths are
-// single-quoted with shellQuote (no Go %q expansion hazards).
+// single-quoted with ShellQuote (no Go %q expansion hazards).
 func writeFileScript(path, content string) string {
 	b64 := base64.StdEncoding.EncodeToString([]byte(content))
 	return fmt.Sprintf("sudo mkdir -p %s && printf %%s %s | base64 -d | sudo tee %s > /dev/null",
-		shellQuote(filepath.Dir(path)), b64, shellQuote(path))
+		ShellQuote(filepath.Dir(path)), b64, ShellQuote(path))
 }
 
-// shellQuote single-quotes s for POSIX shells. An embedded single quote is
+// ShellQuote single-quotes s for POSIX shells. An embedded single quote is
 // rendered as '\” — close the quote, an escaped literal quote, reopen.
-func shellQuote(s string) string {
+func ShellQuote(s string) string {
 	return "'" + strings.ReplaceAll(s, "'", `'\''`) + "'"
 }

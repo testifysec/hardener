@@ -24,8 +24,8 @@ func TestWriteFileScriptResistsDelimiterInjection(t *testing.T) {
 
 // Paths with shell metacharacters must be single-quoted safely.
 func TestWriteFileScriptQuotesPath(t *testing.T) {
-	if got, want := shellQuote(`it's a $path`), `'it'\''s a $path'`; got != want {
-		t.Errorf("shellQuote = %q, want %q", got, want)
+	if got, want := ShellQuote(`it's a $path`), `'it'\''s a $path'`; got != want {
+		t.Errorf("ShellQuote = %q, want %q", got, want)
 	}
 	script := writeFileScript("/etc/app/x", "x")
 	if !strings.Contains(script, `'/etc/app/x'`) {

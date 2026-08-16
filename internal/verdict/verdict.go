@@ -120,6 +120,12 @@ type Coverage struct {
 	StaticImports bool     `json:"staticImports"`
 	Predictions   []string `json:"predictions,omitempty"`
 	Gaps          []string `json:"gaps,omitempty"`
+	// BaseGrants are the refpolicy interfaces every generated domain receives
+	// UNCONDITIONALLY (shell/bin execution, /etc and /usr reads, generic cert
+	// access, syslog). They produce no AVCs, so they are never "observed" —
+	// the verdict discloses them explicitly as review-required privilege, so a
+	// pass cannot imply these were exercised and minimized (review finding).
+	BaseGrants []string `json:"baseGrants,omitempty"`
 }
 
 // Build maps a pipeline result to the statement. Extra subjects (the RPM,
@@ -190,7 +196,10 @@ func BuildOrErr(res *pipeline.Result, env Env, extra []Subject) (Statement, erro
 			Party: res.Party, Undeclared: res.ConformanceUndecl,
 			Unexercised: res.ConformanceUnexer, Fatal: res.ConformanceFatal,
 		},
-		Coverage: Coverage{StaticImports: res.StaticImports},
+		Coverage: Coverage{
+			StaticImports: res.StaticImports,
+			BaseGrants:    append([]string(nil), policy.BaseInterfaces...),
+		},
 	}
 	for _, c := range res.StaticChecks {
 		p.Gates.StaticChecks = append(p.Gates.StaticChecks, CheckResult{Name: c.Name, Passed: c.Passed, Detail: c.Detail})
