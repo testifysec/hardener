@@ -74,7 +74,11 @@ func GenerateSpec(p *profile.Profile, revision string) string {
 		fmt.Fprintf(&relabel,
 			"_r=%[1]s\n"+
 				"if [ -e \"$_r\" ]; then restorecon -RF -- \"$_r\" || { printf 'ERROR: could not relabel declared root %%s; refusing to leave it under a broader label\\n' \"$_r\" >&2; exit 1; }; "+
-				"_rl=$(stat -c '%%C' -- \"$_r\" 2>/dev/null); case \"$_rl\" in *:%[2]s:*) : ;; *) printf 'ERROR: declared root %%s is labeled %%s, not %[2]s — a higher-priority file-context rule is overriding it\\n' \"$_r\" \"$_rl\" >&2; exit 1 ;; esac; fi\n",
+				"_rl=$(stat -c '%%C' -- \"$_r\" 2>/dev/null); case \"$_rl\" in *:%[2]s:*) : ;; *) printf 'ERROR: declared root %%s is labeled %%s, not %[2]s — a higher-priority file-context rule is overriding it\\n' \"$_r\" \"$_rl\" >&2; exit 1 ;; esac; "+
+				// A LOCAL file-context rule UNDER our root can override the labeling on
+				// a descendant while the root itself verifies correctly (review finding).
+				// Refuse if any local customization sits under this root.
+				"if semanage fcontext -C -l 2>/dev/null | awk '{print $1}' | grep -q \"^$_r/\"; then printf 'ERROR: a local file-context rule under %%s could override the app labeling; refusing\\n' \"$_r\" >&2; exit 1; fi; fi\n",
 			vm.ShellQuote(root), wantType)
 	}
 	// PASS 3 — relabel + VERIFY each entrypoint. The label is load-bearing:

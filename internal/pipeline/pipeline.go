@@ -135,6 +135,7 @@ func Run(r vm.Runner, t *target.Target, opts Options) *Result {
 			return
 		}
 		appName := policy.SafeName(p.Name)
+		pt := policy.PortType(p.Name)
 		// ORDER MATTERS. Clear the permissive entry and DELETE the port mappings
 		// FIRST — the port mappings reference the module's <app>_port_t type, so
 		// `semodule -r` fails while they exist and, with its error discarded, the
@@ -143,10 +144,15 @@ func Run(r vm.Runner, t *target.Target, opts Options) *Result {
 		// and restore labels last.
 		_, _ = r.Run(fmt.Sprintf("sudo semanage permissive -d %s 2>/dev/null || true", dom))
 		for _, port := range p.Ports {
-			// `semanage port -d` does NOT accept -t (the type option is for add/
-			// modify) — with -t the delete errored and left the mapping, which then
-			// blocked `semodule -r` (review finding). Delete by proto/port only.
-			_, _ = r.Run(fmt.Sprintf("sudo semanage port -d -p %s %d 2>/dev/null || true", port.Proto, port.Port))
+			// Only delete a mapping that is CURRENTLY OURS. moduleInstalled is armed
+			// BEFORE the ports are assigned, so a compile/load failure must not delete
+			// a pre-existing FOREIGN mapping on the same proto/port (review finding).
+			// `semanage port -d` rejects -t, so confirm ownership via -l first, then
+			// delete by proto/port.
+			check, _ := r.Run(fmt.Sprintf("sudo semanage port -l 2>/dev/null | awk '$1==%q && $2==%q'", pt, port.Proto))
+			if portListed(check, port.Port) {
+				_, _ = r.Run(fmt.Sprintf("sudo semanage port -d -p %s %d 2>/dev/null || true", port.Proto, port.Port))
+			}
 		}
 		for attempt := 0; attempt < 2; attempt++ {
 			_, _ = r.Run(fmt.Sprintf("sudo semodule -r %s 2>/dev/null || true", appName))
@@ -899,6 +905,30 @@ sudo semodule -i %s.pp
 		}
 		if lbl := strings.TrimSpace(out); lbl != "SKIP" && !strings.Contains(lbl, ":"+wantType+":") {
 			return fmt.Errorf("declared root %s is labeled %q, not %s — a higher-priority file-context rule is overriding it; refusing to sign a mislabeled claim", root, lbl, wantType)
+		}
+	}
+	// Verifying only the ROOT's label misses a more-specific file_contexts.local
+	// rule that overrides a DESCENDANT while the root still passes (review
+	// finding). Walking a whole tree is impractical and collides with legitimately
+	// overlapping declared sub-paths (splunk's var/etc under its content root), so
+	// instead REJECT any LOCAL file-context customization that overlaps a declared
+	// root — that is the only thing that can silently override our labeling.
+	if local, err := r.Run("sudo semanage fcontext -C -l 2>/dev/null"); err == nil {
+		for _, line := range strings.Split(local, "\n") {
+			f := strings.Fields(line)
+			if len(f) == 0 || !strings.HasPrefix(f[0], "/") {
+				continue
+			}
+			lroot := fcRoot(f[0])
+			for _, pa := range p.Paths {
+				our := fcRoot(pa.Path)
+				if our == "" || lroot == "" {
+					continue
+				}
+				if our == lroot || strings.HasPrefix(lroot+"/", our+"/") || strings.HasPrefix(our+"/", lroot+"/") {
+					return fmt.Errorf("a local file-context rule (%s) overlaps declared root %s — it could silently override the app's labeling on some files; remove the conflicting local rule or use a distinct path", f[0], our)
+				}
+			}
 		}
 	}
 	// Executables are relabeled here too but their exec-type is verified in the
