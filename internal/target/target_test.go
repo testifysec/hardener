@@ -256,3 +256,23 @@ func TestLoadRejectsWhitespaceInPath(t *testing.T) {
 		}
 	}
 }
+
+// Round 33: a multi-document manifest must be rejected — content after `---`
+// would be silently dropped, potentially discarding party/declaration and
+// producing evidence under weaker rules.
+func TestLoadRejectsMultiDocument(t *testing.T) {
+	m := `name: widget
+install: "true"
+unit: widget.service
+exercise: "true"
+executables:
+  - /opt/widget/bin/widgetd
+party: second
+declared: {}
+---
+party: third
+`
+	if _, err := Load(write(t, m)); err == nil {
+		t.Error("a multi-document manifest must be rejected")
+	}
+}

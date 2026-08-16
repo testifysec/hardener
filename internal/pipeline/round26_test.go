@@ -47,6 +47,8 @@ func TestExerciseToleratesSameIdentityRestart(t *testing.T) {
 	f := &fakeRunner{responses: map[string]string{
 		"stat -c '%s %i'":           "0 4242",
 		"stat -c '%i'":              "4242",
+		"auditctl -s":               "enabled 1 lost 0 backlog 0",
+		"is-active widget.service":  "inactive",
 		"systemctl show -p MainPID": same,
 	}}
 	if _, _, _, err := exercise(f, tgt, "widget_t"); err != nil {
@@ -105,6 +107,7 @@ func TestExerciseFailsClosedOnAuditLoss(t *testing.T) {
 		responses: map[string]string{
 			"stat -c '%s %i'":           "0 4242",
 			"stat -c '%i'":              "4242",
+			"is-active widget.service":  "inactive",
 			"systemctl show -p MainPID": "LABEL:system_u:system_r:widget_t:s0\nEXE:/opt/widget/bin/widgetd\nEXESHA:" + strings.Repeat("ab", 32),
 		},
 		seq: map[string][]string{
@@ -252,5 +255,35 @@ func TestExerciseFailsClosedOnTransitionalState(t *testing.T) {
 	}}
 	if _, _, _, err := exercise(f, tgt, "widget_t"); err == nil || !strings.Contains(err.Error(), "not cleanly stopped") {
 		t.Fatalf("a transitional post-stop state must fail closed, got %v", err)
+	}
+}
+
+// Round 33: the verifier baseline SCOPES the verdict. If a required field cannot
+// be collected the run must fail closed, not sign an unscoped verdict.
+func TestRunFailsClosedWhenVerifierBaselineIncomplete(t *testing.T) {
+	f := passingRunner()
+	f.failOn = []string{"uname -r"} // kernel cannot be collected
+	res := Run(f, testTarget(), Options{MaxRounds: 2})
+	if !strings.Contains(res.FailureReason, "verifier kernel") {
+		t.Errorf("a missing verifier baseline field must fail closed, got %q", res.FailureReason)
+	}
+}
+
+// Round 33: an empty/unknown post-stop probe is fail-open — only an explicit
+// "inactive"/"failed" counts as stopped.
+func TestExerciseFailsClosedOnUnknownStopState(t *testing.T) {
+	tgt := &target.Target{
+		Name: "widget", Unit: "widget.service", Install: "true",
+		Exercise: "true", Executables: []string{"/opt/widget/bin/widgetd"},
+	}
+	// No is-active response → probe returns empty (unknown), which must fail.
+	f := &fakeRunner{responses: map[string]string{
+		"stat -c '%s %i'":           "0 4242",
+		"stat -c '%i'":              "4242",
+		"auditctl -s":               "enabled 1 lost 0 backlog 0",
+		"systemctl show -p MainPID": "LABEL:system_u:system_r:widget_t:s0\nEXE:/opt/widget/bin/widgetd\nEXESHA:" + strings.Repeat("ab", 32),
+	}}
+	if _, _, _, err := exercise(f, tgt, "widget_t"); err == nil || !strings.Contains(err.Error(), "not cleanly stopped") {
+		t.Fatalf("an unknown post-stop state must fail closed, got %v", err)
 	}
 }

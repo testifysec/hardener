@@ -94,11 +94,17 @@ func testTarget() *target.Target {
 func TestBailsWhenPermissiveExerciseFailsWithNoDenials(t *testing.T) {
 	f := &fakeRunner{
 		responses: map[string]string{
-			"getenforce":        "Enforcing\nactive",
-			"stat -c '%s %i'":   "0 4242",
-			"stat -c '%i'":      "4242",
-			"systemctl restart": "",
-			"sha256sum":         "abababababababababababababababababababababababababababababababab  /opt/widget/bin/widgetd",
+			"getenforce":               "Enforcing\nactive",
+			"stat -c '%s %i'":          "0 4242",
+			"stat -c '%i'":             "4242",
+			"stat -c %h":               "1",
+			"auditctl -s":              "enabled 1 lost 0 backlog 0",
+			"is-active widget.service": "inactive",
+			"cat /etc/redhat-release":  "AlmaLinux release 9.4",
+			"uname -r":                 "5.14.0-427.el9.x86_64",
+			"rpm -q selinux-policy":    "selinux-policy-38.1.35-2.el9.noarch",
+			"systemctl restart":        "",
+			"sha256sum":                "abababababababababababababababababababababababababababababababab  /opt/widget/bin/widgetd",
 		},
 		failOn: []string{"EXERCISE_MARKER"}, // the exercise script fails
 	}

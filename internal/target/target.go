@@ -4,6 +4,7 @@ package target
 import (
 	"bytes"
 	"fmt"
+	"io"
 	"os"
 	"path/filepath"
 	"strings"
@@ -132,6 +133,13 @@ func Load(path string) (*Target, error) {
 	dec.KnownFields(true)
 	if err := dec.Decode(&t); err != nil {
 		return nil, fmt.Errorf("%s: %w", path, err)
+	}
+	// Reject a MULTI-DOCUMENT manifest. Decoding stops at the first `---`, so a
+	// second document (which could carry a different party/declaration) would be
+	// silently ignored and the artifact evidenced under weaker rules (review
+	// finding). A single document decodes, then the next Decode must be io.EOF.
+	if err := dec.Decode(new(Target)); err != io.EOF {
+		return nil, fmt.Errorf("%s: manifest must contain exactly one YAML document (content after '---' is not allowed)", path)
 	}
 	switch t.Party {
 	case "", "first", "second", "third":

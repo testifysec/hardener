@@ -137,15 +137,24 @@ func Run(r vm.Runner, t *target.Target, opts Options) *Result {
 		return fail("precheck", fmt.Errorf("verifier not observing (need Enforcing + auditd): %s %v", out, err))
 	}
 	// Record the baseline the verdict will be scoped to.
+	// Collect the verifier baseline that SCOPES the verdict, each value with its
+	// OWN command and validated non-empty. The prior single positional command
+	// was fail-open twice over: a failure left VerifierEnv empty (unscoped verdict
+	// still passed), and a missing line shifted every later value into the wrong
+	// field — e.g. the kernel recorded as the distro (review finding).
 	res.VerifierEnv = map[string]string{}
-	if out, err := r.Run("cat /etc/redhat-release; uname -r; getenforce; rpm -q selinux-policy 2>/dev/null"); err == nil {
-		lines := strings.Split(strings.TrimSpace(out), "\n")
-		keys := []string{"distro", "kernel", "selinuxMode", "policyPackage"}
-		for i, k := range keys {
-			if i < len(lines) {
-				res.VerifierEnv[k] = strings.TrimSpace(lines[i])
-			}
+	for _, fld := range []struct{ key, cmd string }{
+		{"distro", "cat /etc/redhat-release"},
+		{"kernel", "uname -r"},
+		{"selinuxMode", "getenforce"},
+		{"policyPackage", "rpm -q selinux-policy"},
+	} {
+		out, err := r.Run(fld.cmd)
+		v := strings.TrimSpace(out)
+		if err != nil || v == "" {
+			return fail("verifier-baseline", fmt.Errorf("could not collect verifier %s via %q (out=%q, err=%v) — refusing to sign an unscoped verdict", fld.key, fld.cmd, v, err))
 		}
+		res.VerifierEnv[fld.key] = v
 	}
 
 	// Refuse to SHADOW an existing SELinux policy. If the domain type already
@@ -777,7 +786,9 @@ func installPolicy(r vm.Runner, p *profile.Profile, te, fc string) error {
 	if err := r.WriteFile(dir+"/"+app+".fc", fc); err != nil {
 		return err
 	}
-	reconcileStalePorts(r, p)
+	if err := reconcileStalePorts(r, p); err != nil {
+		return err
+	}
 	script := fmt.Sprintf(`set -e
 cd %s
 sudo make -f /usr/share/selinux/devel/Makefile %s.pp
@@ -802,25 +813,43 @@ sudo semodule -i %s.pp
 // the new module does not define makes semanage_base_merge fail with
 // "Invalid argument" on every later policy operation, so this must run BEFORE
 // semodule -i.
-func reconcileStalePorts(r vm.Runner, p *profile.Profile) {
+func reconcileStalePorts(r vm.Runner, p *profile.Profile) error {
 	pt := policy.PortType(p.Name)
 	current := map[string]bool{}
 	for _, port := range p.Ports {
 		current[fmt.Sprintf("%s/%d", port.Proto, port.Port)] = true
 	}
-	// semanage port -l prints "type  proto  8080, 8443, 9000-9010" — every
-	// token after the protocol is a port or range, comma-separated. Reading
-	// only field 3 leaves stale mappings behind (review finding).
-	existing, _ := r.Run(fmt.Sprintf("sudo semanage port -l 2>/dev/null | awk '$1==\"%s\" {proto=$2; for(i=3;i<=NF;i++){gsub(\",\",\"\",$i); print proto\"/\"$i}}'", pt))
-	for _, m := range strings.Fields(existing) {
-		if current[m] {
+	// FAIL CLOSED on enumeration/deletion errors. Discarding them let a stale
+	// <app>_port_t mapping survive, so verification passed while the service could
+	// bind an undeclared port, and the RPM later pruned it and failed in
+	// deployment (review finding). Parse `semanage port -l` in Go (its status is
+	// then observable, unlike a `| awk` pipe whose exit code masks semanage's).
+	// semanage prints "type  proto  8080, 8443, 9000-9010" — every token after
+	// the protocol is a comma-separated port or range.
+	raw, err := r.Run("sudo semanage port -l 2>/dev/null")
+	if err != nil {
+		return fmt.Errorf("could not enumerate SELinux port mappings for %s: %w", pt, err)
+	}
+	for _, line := range strings.Split(raw, "\n") {
+		f := strings.Fields(line)
+		if len(f) < 3 || f[0] != pt {
 			continue
 		}
-		parts := strings.SplitN(m, "/", 2)
-		if len(parts) == 2 && parts[1] != "" {
-			_, _ = r.Run(fmt.Sprintf("sudo semanage port -d -t %s -p %s %s 2>/dev/null || true", pt, parts[0], parts[1]))
+		proto := f[1]
+		for _, tok := range f[2:] {
+			port := strings.TrimSuffix(tok, ",")
+			if port == "" {
+				continue
+			}
+			if current[proto+"/"+port] {
+				continue
+			}
+			if _, err := r.Run(fmt.Sprintf("sudo semanage port -d -t %s -p %s %s", pt, proto, port)); err != nil {
+				return fmt.Errorf("could not delete stale port mapping %s/%s from %s: %w", proto, port, pt, err)
+			}
 		}
 	}
+	return nil
 }
 
 // runInfo captures what the MainPID actually was during the exercise window:
@@ -903,9 +932,17 @@ func exercise(r vm.Runner, t *target.Target, dom string) ([]avc.Denial, bool, ru
 	// missed the transitional states (review finding). Only "inactive"/"failed"
 	// (or an unknown/empty answer on a stubbed environment) are treated as stopped.
 	actOut, _ := r.Run(fmt.Sprintf("systemctl is-active %s", t.Unit))
+	// Require an EXPLICIT stopped state. `is-active` returns non-zero for a
+	// stopped unit, so the exit status is not a usable signal; the OUTPUT is.
+	// Accepting empty/unknown output was fail-open — if both stop and the probe
+	// failed, a still-running process could keep generating AVCs after we read the
+	// slice (review finding). Only "inactive"/"failed" count as stopped; anything
+	// else (running, transitional, empty, unknown) fails closed.
 	switch strings.TrimSpace(actOut) {
-	case "active", "activating", "deactivating", "reloading":
-		return nil, exOK, run, fmt.Errorf("unit %s is %q after the exercise (not cleanly stopped, stopErr=%v) — it may still generate denials outside the observed window", t.Unit, strings.TrimSpace(actOut), stopErr)
+	case "inactive", "failed":
+		// confirmed stopped
+	default:
+		return nil, exOK, run, fmt.Errorf("unit %s is not cleanly stopped after the exercise (state=%q, stopErr=%v) — it may still generate denials outside the observed window", t.Unit, strings.TrimSpace(actOut), stopErr)
 	}
 	// Drain barrier: the process is dead, so no NEW records are generated; give
 	// auditd's backlog a bounded chance to flush pending records to disk before we
