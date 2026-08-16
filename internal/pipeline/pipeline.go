@@ -243,10 +243,20 @@ func Run(r vm.Runner, t *target.Target, opts Options) *Result {
 				return true, nil // a module named <app> already exists → conflict
 			}
 		}
-		out, err := r.Run(fmt.Sprintf("seinfo -t %s 2>/dev/null", dom))
-		if err == nil && strings.Contains(out, dom) {
-			return true, nil // the type is defined → conflict
+		// Check EVERY type this build will generate, not just the domain. A
+		// DIFFERENTLY-named foreign module can already own another of our types —
+		// e.g. <app>_port_t — and reconciliation would then delete ITS port
+		// mappings before `semodule -i` fails on the duplicate type, corrupting
+		// unrelated policy (review finding). Any pre-existing generated type is a
+		// conflict.
+		for _, gt := range generatedTypes(p) {
+			if out, err := r.Run(fmt.Sprintf("seinfo -t %s 2>/dev/null", gt)); err == nil && strings.Contains(out, gt) {
+				return true, nil // one of our generated types is already defined → conflict
+			}
 		}
+		// dom itself was covered by the loop above; re-run only to detect whether the
+		// query TOOLS work at all (for the fail-closed check below).
+		_, err := r.Run(fmt.Sprintf("seinfo -t %s 2>/dev/null", dom))
 		out2, err2 := r.Run(fmt.Sprintf("sesearch -A -s %s -c process 2>/dev/null", dom))
 		if err2 == nil && strings.TrimSpace(out2) != "" {
 			return true, nil // a process rule for the type exists → conflict
@@ -828,6 +838,37 @@ func isAppOwnedExecutable(p *profile.Profile, path string) bool {
 	return false
 }
 
+// underAnotherDeclaredRoot reports whether path falls under a DIFFERENT declared
+// path root than current — such a descendant legitimately carries that other
+// root's type (e.g. splunk's /opt/splunkforwarder/var under its content root),
+// so it must not be flagged as mislabeled.
+func underAnotherDeclaredRoot(path, current string, paths []profile.PathAccess) bool {
+	for _, pa := range paths {
+		other := fcRoot(pa.Path)
+		if other == "" || other == current {
+			continue
+		}
+		if path == other || strings.HasPrefix(path, strings.TrimRight(other, "/")+"/") {
+			return true
+		}
+	}
+	return false
+}
+
+// generatedTypes returns every SELinux type name this build may emit for the
+// app — the domain, the port type, and every kind's file type — so the conflict
+// check can refuse if a foreign module already owns ANY of them.
+func generatedTypes(p *profile.Profile) []string {
+	types := []string{policy.DomainType(p.Name), policy.PortType(p.Name)}
+	for _, k := range []policy.Kind{
+		policy.KindExec, policy.KindConf, policy.KindVarLib, policy.KindLog,
+		policy.KindRuntime, policy.KindTmp, policy.KindCache, policy.KindContent,
+	} {
+		types = append(types, policy.TypeForKind(p.Name, k))
+	}
+	return types
+}
+
 // norm lowercases and maps separators to underscores so path components
 // compare against the SafeName-normalized app name.
 func norm(s string) string {
@@ -905,6 +946,21 @@ sudo semodule -i %s.pp
 		}
 		if lbl := strings.TrimSpace(out); lbl != "SKIP" && !strings.Contains(lbl, ":"+wantType+":") {
 			return fmt.Errorf("declared root %s is labeled %q, not %s — a higher-priority file-context rule is overriding it; refusing to sign a mislabeled claim", root, lbl, wantType)
+		}
+		// Verify DESCENDANTS too, not only the root: a more-specific BASE-policy
+		// rule beneath a broad declared root can retain a different label while the
+		// root verifies (review finding — collision detection only compares exact
+		// patterns). List descendants NOT carrying our type; a legitimately-
+		// overlapping declared sub-path (splunk's var/etc under its content root) is
+		// excluded here.
+		desc, derr := r.Run(fmt.Sprintf("if [ -e %s ]; then find %s \\( -type f -o -type d \\) ! -context '*:%s:*' 2>/dev/null | head -50; fi", q, q, wantType))
+		if derr == nil {
+			for _, d := range strings.Split(strings.TrimSpace(desc), "\n") {
+				if d = strings.TrimSpace(d); d == "" || underAnotherDeclaredRoot(d, root, p.Paths) {
+					continue
+				}
+				return fmt.Errorf("descendant %s under declared root %s is not labeled %s — a more-specific file-context rule is overriding it; refusing to sign a mislabeled claim", d, root, wantType)
+			}
 		}
 	}
 	// Verifying only the ROOT's label misses a more-specific file_contexts.local
@@ -1209,17 +1265,17 @@ func exercise(r vm.Runner, t *target.Target, dom string) ([]avc.Denial, bool, ru
 	if strings.TrimSpace(post2) != startInode {
 		return nil, exOK, run, fmt.Errorf("audit log rotated during read (inode %s→%s) — re-run", startInode, strings.TrimSpace(post2))
 	}
-	// Same-inode TRUNCATION: the file could be truncated below our offset between
-	// the pre-tail stat and the SEPARATE tail, so tail returns empty successfully
-	// while the inode is unchanged — a false zero-denial the inode check alone
-	// missed (review finding). Re-read the size and fail if it shrank since the
-	// pre-tail stat, so the region we read was intact throughout.
+	// The size must be UNCHANGED across the read. Accepting non-shrinkage was
+	// fail-open: if the log GREW between the pre-tail stat and the tail, an AVC was
+	// appended that our `tail -c +offset` (which stops at its own EOF) may not have
+	// captured — a false zero-denial (review finding). A shrink means truncation.
+	// Either direction fails: the region we read must have been stable throughout.
 	post2s, err := r.Run("sudo stat -c '%s' /var/log/audit/audit.log")
 	if err != nil {
 		return nil, exOK, run, fmt.Errorf("audit log post-read size stat: %w", err)
 	}
-	if s := strings.TrimSpace(post2s); s != "" && sizeShrank(postFields[0], s) {
-		return nil, exOK, run, fmt.Errorf("audit log truncated during read (%s→%s bytes) — the slice may be incomplete; re-run", postFields[0], s)
+	if s := strings.TrimSpace(post2s); s != "" && s != strings.TrimSpace(postFields[0]) {
+		return nil, exOK, run, fmt.Errorf("audit log changed size during read (%s→%s bytes) — a record may have been written after the read; re-run", postFields[0], s)
 	}
 	// If the kernel dropped audit records during the window, the slice we just
 	// read may be missing AVCs — a zero-denial result would be a false pass. Only

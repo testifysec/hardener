@@ -193,6 +193,17 @@ func Load(path string) (*Target, error) {
 	if t.Party == "second" && t.Declared == nil {
 		return nil, fmt.Errorf("%s: party: second requires a declared: block (the supplier's privilege declaration)", path)
 	}
+	// A `declared:` block is ONLY meaningful for a second-party artifact, and a
+	// `baseline:` only for first-party. Accepting either under an omitted/third
+	// party would silently give a supplier weaker third-party handling (failureOf
+	// only fails undeclared behavior for first/second) and a passing attestation
+	// (review finding). Fail closed on the mismatch.
+	if t.Declared != nil && t.Party != "second" {
+		return nil, fmt.Errorf("%s: a declared: block is only valid for party: second (got party %q)", path, t.Party)
+	}
+	if t.Baseline != "" && t.Party != "first" {
+		return nil, fmt.Errorf("%s: a baseline: is only valid for party: first (got party %q)", path, t.Party)
+	}
 	for _, missing := range []struct {
 		ok  bool
 		msg string

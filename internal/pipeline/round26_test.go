@@ -345,7 +345,7 @@ func TestExerciseFailsClosedOnSameInodeTruncation(t *testing.T) {
 		"is-active widget.service":  "inactive",
 		"systemctl show -p MainPID": "LABEL:system_u:system_r:widget_t:s0\nEXE:/opt/widget/bin/widgetd\nEXESHA:" + strings.Repeat("ab", 32),
 	}}
-	if _, _, _, err := exercise(f, tgt, "widget_t"); err == nil || !strings.Contains(err.Error(), "truncated during read") {
+	if _, _, _, err := exercise(f, tgt, "widget_t"); err == nil || !strings.Contains(err.Error(), "changed size during read") {
 		t.Fatalf("same-inode truncation must fail closed, got %v", err)
 	}
 }
@@ -523,5 +523,43 @@ func TestExerciseFailsClosedWhenAuditLogKeepsGrowing(t *testing.T) {
 	}
 	if _, _, _, err := exercise(f, tgt, "widget_t"); err == nil || !strings.Contains(err.Error(), "did not stabilize") {
 		t.Fatalf("a still-growing audit log must fail closed, got %v", err)
+	}
+}
+
+// Round 45: a foreign module owning ANY generated type (e.g. <app>_port_t), not
+// just the domain, is a conflict — reconciliation would otherwise delete its
+// mappings before semodule -i fails.
+func TestRunDetectsForeignGeneratedTypeConflict(t *testing.T) {
+	f := passingRunner()
+	f.responses["seinfo -t widget_port_t"] = "Types: 1\n   widget_port_t\n"
+	res := Run(f, testTarget(), Options{MaxRounds: 2})
+	if !strings.Contains(res.FailureReason, "name-conflict") && !strings.Contains(res.FailureReason, "already exists") {
+		t.Errorf("a pre-existing generated type must be a conflict, got %q", res.FailureReason)
+	}
+}
+
+// Round 45: the audit log GROWING between the pre-tail stat and the post-read
+// stat means a record was appended after our tail — a false zero-denial. Must
+// fail closed on any size change, not only shrinkage.
+func TestExerciseFailsClosedWhenAuditLogGrewDuringRead(t *testing.T) {
+	tgt := &target.Target{
+		Name: "widget", Unit: "widget.service", Install: "true",
+		Exercise: "true", Executables: []string{"/opt/widget/bin/widgetd"},
+	}
+	f := &fakeRunner{
+		responses: map[string]string{
+			"stat -c '%s %i'":           "100 4242", // pre-tail size 100
+			"stat -c '%i'":              "4242",
+			"auditctl -s":               "enabled 1 lost 0 backlog 0",
+			"is-active widget.service":  "inactive",
+			"systemctl show -p MainPID": "LABEL:system_u:system_r:widget_t:s0\nEXE:/opt/widget/bin/widgetd\nEXESHA:" + strings.Repeat("ab", 32),
+		},
+		seq: map[string][]string{
+			// barrier stabilizes at 100, then the post-read size is 200 (grew).
+			"stat -c '%s'": {"100", "100", "200"},
+		},
+	}
+	if _, _, _, err := exercise(f, tgt, "widget_t"); err == nil || !strings.Contains(err.Error(), "changed size during read") {
+		t.Fatalf("a growing audit log must fail closed, got %v", err)
 	}
 }
