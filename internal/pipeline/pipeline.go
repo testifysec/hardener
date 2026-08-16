@@ -135,10 +135,33 @@ func Run(r vm.Runner, t *target.Target, opts Options) *Result {
 			return
 		}
 		appName := policy.SafeName(p.Name)
-		_, _ = r.Run(fmt.Sprintf("sudo semodule -r %s 2>/dev/null || true", appName))
 		pt := policy.PortType(p.Name)
+		// ORDER MATTERS. Clear the permissive entry and DELETE the port mappings
+		// FIRST — the port mappings reference the module's <app>_port_t type, so
+		// `semodule -r` fails while they exist and, with its error discarded, the
+		// module (and its labels) would be left on the persistent verifier (review
+		// finding). Only then remove the module, VERIFY it is gone (retry once),
+		// and restore labels last.
+		_, _ = r.Run(fmt.Sprintf("sudo semanage permissive -d %s 2>/dev/null || true", dom))
 		for _, port := range p.Ports {
 			_, _ = r.Run(fmt.Sprintf("sudo semanage port -d -t %s -p %s %d 2>/dev/null || true", pt, port.Proto, port.Port))
+		}
+		for attempt := 0; attempt < 2; attempt++ {
+			_, _ = r.Run(fmt.Sprintf("sudo semodule -r %s 2>/dev/null || true", appName))
+			out, err := r.Run("sudo semodule -l 2>/dev/null")
+			if err != nil {
+				continue // could not verify; retry the removal
+			}
+			gone := true
+			for _, line := range strings.Split(out, "\n") {
+				if f := strings.Fields(line); len(f) > 0 && f[0] == appName {
+					gone = false
+					break
+				}
+			}
+			if gone {
+				break
+			}
 		}
 		for _, root := range RelabelRoots(p) {
 			q := vm.ShellQuote(root)
