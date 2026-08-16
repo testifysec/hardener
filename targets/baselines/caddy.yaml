@@ -7,3 +7,18 @@ foreign_types:
     - sysctl_net_t
 foreign_port_binds:
     - unreserved_port_t
+base_grants:
+    - kernel_read_system_state
+    - corecmd_exec_bin
+    - corecmd_exec_shell
+    - libs_exec_ldconfig
+    - miscfiles_read_localization
+    - miscfiles_read_generic_certs
+    - logging_send_syslog_msg
+    - files_read_etc_files
+    - files_read_usr_files
+    - fs_getattr_all_fs
+    - dev_read_urand
+    - dev_read_rand
+    - dev_read_sysfs
+    - auth_use_nsswitch
