@@ -101,6 +101,7 @@ func TestBailsWhenPermissiveExerciseFailsWithNoDenials(t *testing.T) {
 			"stat -c %h":               "1",
 			"auditctl -s":              "enabled 1 lost 0 backlog 0",
 			"semodule -l":              "base\nselinux-policy\nunconfined\n",
+			"grep -Fc":                 "1",
 			"is-active widget.service": "inactive",
 			"cat /etc/redhat-release":  "AlmaLinux release 9.4",
 			"uname -r":                 "5.14.0-427.el9.x86_64",

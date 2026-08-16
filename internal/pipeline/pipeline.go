@@ -553,6 +553,10 @@ func Run(r vm.Runner, t *target.Target, opts Options) *Result {
 		return fail("module-baseline", err)
 	}
 	expectedMods[appMod] = true
+	// Content fingerprint of OUR module, refreshed after each (re)install below and
+	// checked in recheck — catches a same-name replacement the name-set snapshot
+	// misses (review finding). Empty until our module is first installed.
+	var expectedModuleDigest string
 
 	var extraRules []policy.AllowRule
 	prevRelabels := ""
@@ -567,6 +571,7 @@ func Run(r vm.Runner, t *target.Target, opts Options) *Result {
 		if err := installPolicy(r, p, te, fc); err != nil {
 			return fail(fmt.Sprintf("policy-install round %d", round), err)
 		}
+		expectedModuleDigest = moduleContentDigest(r, appMod)
 		res.FinalTE, res.FinalFC = te, fc
 
 		opts.Log("[%s] observe round %d (permissive domain)", t.Name, round)
@@ -646,6 +651,7 @@ func Run(r vm.Runner, t *target.Target, opts Options) *Result {
 	if err := installPolicy(r, p, finalTE, finalFC); err != nil {
 		return fail("final-policy-install", err)
 	}
+	expectedModuleDigest = moduleContentDigest(r, appMod)
 	res.FinalTE, res.FinalFC = finalTE, finalFC
 
 	// The verifier itself must still be trustworthy after running the
@@ -678,6 +684,19 @@ func Run(r vm.Runner, t *target.Target, opts Options) *Result {
 		for m := range cur {
 			if !expectedMods[m] {
 				return fmt.Errorf("verifier integrity lost %s: unexpected SELinux module %q loaded since baseline — a foreign policy module can suppress denials and fake a clean enforcement; refusing", when, m)
+			}
+		}
+		// Same-NAME content replacement: the name set is unchanged when a privileged
+		// exercise swaps OUR module for a broader one under its own name, so also
+		// compare the loaded content digest against what we last installed. A drift
+		// means the enforced policy differs from FinalTE and the packaged RPM — a
+		// false pass (review finding). Only enforced when we hold a baseline (a
+		// stubbed env yields ""); a same-name replace-and-restore within a single
+		// exercise still evades a point-in-time check — that residual is the
+		// deferred privilege-dropped-exercise decision.
+		if expectedModuleDigest != "" {
+			if got := moduleContentDigest(r, appMod); got != expectedModuleDigest {
+				return fmt.Errorf("verifier integrity lost %s: the loaded %s module content changed since install (%s→%s) — a same-name module replacement; the enforced policy no longer matches FinalTE; refusing", when, appMod, expectedModuleDigest, got)
 			}
 		}
 		return nil
@@ -753,6 +772,7 @@ func Run(r vm.Runner, t *target.Target, opts Options) *Result {
 		if err := installPolicy(r, p, te, fc); err != nil {
 			return fail("policy-install (enforce refinement)", err)
 		}
+		expectedModuleDigest = moduleContentDigest(r, appMod)
 		res.FinalTE, res.FinalFC = te, fc
 	}
 
@@ -1288,16 +1308,17 @@ func exercise(r vm.Runner, t *target.Target, dom string) ([]avc.Denial, bool, ru
 	if !backlogDrained {
 		return nil, exOK, run, fmt.Errorf("auditd backlog did not drain (or could not be confirmed) after the exercise — audit records may still be unwritten; re-run on a less loaded verifier")
 	}
-	// WRITE BARRIER. backlog==0 only means the kernel handed records to auditd —
-	// NOT that auditd finished APPENDING them to audit.log. The PRIMARY barrier is
-	// an ORDERED SENTINEL: emit a unique USER record NOW (the unit is already
-	// stopped, so this record is ordered AFTER every AVC the unit produced), then
-	// wait until it lands in the log. Once the sentinel is written, auditd has
-	// necessarily flushed everything queued before it, so no late AVC can slip in
-	// after our read — which a size-stabilization heuristic cannot guarantee
-	// (auditd can dequeue an AVC and append it just after the size settles)
-	// (review finding). The sentinel text embeds the exercise's start inode+offset
-	// so it is unique per run.
+	// WRITE BARRIER via an ORDERED SENTINEL — the ONLY barrier, fail closed. backlog==0
+	// only means the kernel handed records to auditd, NOT that auditd finished
+	// APPENDING them to audit.log. Emit a unique USER record NOW (the unit is already
+	// stopped, so this record is ordered AFTER every AVC the unit produced) and wait
+	// until it lands in the log; once written, auditd has necessarily flushed
+	// everything queued before it, so no late AVC can slip in after our read. A
+	// size-stabilization heuristic CANNOT guarantee this (auditd can dequeue an AVC
+	// and append it just after the size settles), so a previous fallback to it was
+	// removed: if the sentinel cannot be established we FAIL CLOSED rather than read a
+	// possibly-incomplete window (review finding). The sentinel text embeds the
+	// exercise's start inode+offset so it is unique per run.
 	barrierOK := false
 	sentinel := fmt.Sprintf("hardener-barrier-%s-%s", startInode, strings.TrimSpace(offset))
 	if _, err := r.Run("sudo auditctl -m " + vm.ShellQuote(sentinel)); err == nil {
@@ -1312,28 +1333,8 @@ func exercise(r vm.Runner, t *target.Target, dom string) ([]avc.Denial, bool, ru
 			}
 		}
 	}
-	// FALLBACK — only if the sentinel mechanism is unavailable (older auditctl, a
-	// user-message filter): wait (bounded) until the log SIZE stops growing across
-	// two consecutive stats. Weaker than the sentinel but never worse than the
-	// prior behavior; fail closed if neither barrier can be established.
 	if !barrierOK {
-		sizeStable := false
-		prevSize := ""
-		for i := 0; i < 8; i++ {
-			s, err := r.Run("sudo stat -c '%s' /var/log/audit/audit.log")
-			if err != nil {
-				continue
-			}
-			s = strings.TrimSpace(s)
-			if s != "" && s == prevSize {
-				sizeStable = true
-				break
-			}
-			prevSize = s
-		}
-		if !sizeStable {
-			return nil, exOK, run, fmt.Errorf("audit write barrier could not be established after the exercise: no sentinel, and the log size did not stabilize — auditd is still writing; re-run on a less loaded verifier")
-		}
+		return nil, exOK, run, fmt.Errorf("audit write-barrier sentinel could not be established after the exercise (auditctl -m unavailable, or the record never appeared) — refusing to read a possibly-incomplete audit window; ensure auditd + auditctl are functional on the verifier")
 	}
 	// Fail closed on log rotation/truncation: a new inode or a shrunk file
 	// means our byte offset is stale and a plain tail would silently miss AVC
@@ -1465,6 +1466,26 @@ func moduleNameSet(r vm.Runner) (map[string]bool, error) {
 		return nil, fmt.Errorf("semodule -l returned no modules — refusing to trust an empty module list")
 	}
 	return set, nil
+}
+
+// moduleContentDigest returns a stable content fingerprint of the app's LOADED
+// SELinux module — a hash of the files in its policy-store module directory,
+// concatenated in sorted order. A same-name module REPLACEMENT (a broader policy
+// installed under the app's own name) changes these bytes while leaving the
+// module NAME set unchanged, so comparing this digest across the observation
+// window catches a swap that moduleNameSet cannot. Returns "" when the store is
+// unreadable or the module is absent (e.g. a stubbed test env) — the caller only
+// enforces the check when it holds a non-empty baseline.
+func moduleContentDigest(r vm.Runner, appMod string) string {
+	out, err := r.Run(fmt.Sprintf(`sudo sh -c "find /var/lib/selinux/*/active/modules/*/%s -type f -print0 2>/dev/null | sort -z | xargs -0 cat 2>/dev/null | sha256sum"`, appMod))
+	if err != nil {
+		return ""
+	}
+	f := strings.Fields(strings.TrimSpace(out))
+	if len(f) == 0 {
+		return ""
+	}
+	return f[0]
 }
 
 func auditStatus(r vm.Runner) (enabled, lost, backlog int, ok bool) {
