@@ -7,6 +7,7 @@ import (
 
 	"gopkg.in/yaml.v3"
 
+	"github.com/testifysec/hardener/internal/policy"
 	"github.com/testifysec/hardener/internal/profile"
 )
 
@@ -73,6 +74,18 @@ func Load(path string) (*Target, error) {
 	} {
 		if !missing.ok {
 			return nil, fmt.Errorf("%s: missing required field %q", path, missing.msg)
+		}
+	}
+	// Every declared path must name a KNOWN kind. An unknown or omitted kind
+	// used to fall through to content silently, and content paths receive
+	// can_exec — so a typo could make a config or state file executable. Fail
+	// the manifest instead (review finding).
+	for i, pa := range t.Paths {
+		if pa.Path == "" {
+			return nil, fmt.Errorf("%s: paths[%d]: missing path", path, i)
+		}
+		if !policy.KnownKind(pa.Kind) {
+			return nil, fmt.Errorf("%s: paths[%d] (%s): unknown kind %q — must be one of exec, conf, var_lib, log, runtime, content, tmp, cache, unit", path, i, pa.Path, pa.Kind)
 		}
 	}
 	return &t, nil

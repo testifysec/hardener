@@ -39,8 +39,12 @@ func FindCollisions(p *profile.Profile, baseFileContexts string) []Collision {
 		claimed[fields[0]] = contextType(fields[len(fields)-1])
 	}
 	var out []Collision
-	check := func(path, want string) {
-		base, ok := claimed[path]
+	// matchKey is the fc path spec as GenerateFC emits it (that is what semodule
+	// dedups on and what appears in the base file_contexts). recordPath is the
+	// raw manifest path, kept for exclusion (GenerateFCExcluding filters on the
+	// raw p.Paths / p.Executables values).
+	check := func(matchKey, recordPath, want string) {
+		base, ok := claimed[matchKey]
 		if !ok || base == want {
 			// Not claimed, or a previous install of this same module.
 			// Re-declaring an identical spec is idempotent; treating it as a
@@ -48,17 +52,20 @@ func FindCollisions(p *profile.Profile, baseFileContexts string) []Collision {
 			// application unconfined on re-runs.
 			return
 		}
-		out = append(out, Collision{Path: path, BaseType: base, WouldBeType: want})
+		out = append(out, Collision{Path: recordPath, BaseType: base, WouldBeType: want})
 	}
+	// GenerateFC emits path claims verbatim, so match on the raw path.
 	for _, pa := range p.Paths {
-		check(pa.Path, TypeForKind(p.Name, KindFromString(pa.Kind)))
+		check(pa.Path, pa.Path, TypeForKind(p.Name, KindFromString(pa.Kind)))
 	}
-	// GenerateFC also emits an _exec_t line for every executable, so an
-	// executable path the distro already claims collides just as a path claim
-	// does — an undetected duplicate spec makes semodule reject the whole
-	// module (review finding). Check executables against the exec type too.
+	// GenerateFC emits an _exec_t line for every executable and ESCAPES it
+	// (escapeFCPath: spaces → \s, regex metacharacters quoted). The base claim
+	// to match is therefore the escaped form — comparing the raw path missed a
+	// collision like "Plex\sMedia\sServer", leaving a duplicate spec that makes
+	// semodule reject the module (review finding). Match on the escaped form,
+	// record the raw path for exclusion.
 	for _, exe := range p.Executables {
-		check(exe, TypeForKind(p.Name, KindExec))
+		check(escapeFCPath(exe), exe, TypeForKind(p.Name, KindExec))
 	}
 	return out
 }

@@ -831,20 +831,13 @@ func staticChecks(r vm.Runner, dom string) []StaticCheck {
 	checks := []struct {
 		name  string
 		query string
-		// grepStyle marks a check whose command legitimately exits non-zero on
-		// the PASS path (grep found no match), so a non-zero exit is NOT a
-		// tooling failure. sesearch checks are the opposite: a non-zero exit
-		// means the query could not run, and an empty result must NOT be read
-		// as "no denials" (review finding — fail closed, not open).
-		grepStyle bool
 	}{
-		{"no shadow_t read/write", fmt.Sprintf("sesearch -A -s %s -t shadow_t -c file -p read,write,open,append 2>/dev/null", dom), false},
-		{"no etc_t write", fmt.Sprintf("sesearch -A -s %s -t etc_t -c file -p write,append,create,unlink 2>/dev/null", dom), false},
-		{"no sys_admin capability", fmt.Sprintf("sesearch -A -s %s -c capability -p sys_admin 2>/dev/null", dom), false},
-		{"no sys_module capability", fmt.Sprintf("sesearch -A -s %s -c capability -p sys_module 2>/dev/null", dom), false},
-		{"no kernel module load", fmt.Sprintf("sesearch -A -s %s -c system -p module_load 2>/dev/null", dom), false},
-		{"not permissive", fmt.Sprintf("sudo semanage permissive -l 2>/dev/null | grep -w %s", dom), true},
-		{"no selinux mgmt", fmt.Sprintf("sesearch -A -s %s -t selinux_config_t -p write 2>/dev/null", dom), false},
+		{"no shadow_t read/write", fmt.Sprintf("sesearch -A -s %s -t shadow_t -c file -p read,write,open,append 2>/dev/null", dom)},
+		{"no etc_t write", fmt.Sprintf("sesearch -A -s %s -t etc_t -c file -p write,append,create,unlink 2>/dev/null", dom)},
+		{"no sys_admin capability", fmt.Sprintf("sesearch -A -s %s -c capability -p sys_admin 2>/dev/null", dom)},
+		{"no sys_module capability", fmt.Sprintf("sesearch -A -s %s -c capability -p sys_module 2>/dev/null", dom)},
+		{"no kernel module load", fmt.Sprintf("sesearch -A -s %s -c system -p module_load 2>/dev/null", dom)},
+		{"no selinux mgmt", fmt.Sprintf("sesearch -A -s %s -t selinux_config_t -p write 2>/dev/null", dom)},
 	}
 	var out []StaticCheck
 	for _, c := range checks {
@@ -854,9 +847,8 @@ func staticChecks(r vm.Runner, dom string) []StaticCheck {
 		// returns empty output with a non-zero exit. Recording that as an empty
 		// result marked the domain "clean" — a fail-open verification hole. Fail
 		// the check closed instead so the verdict reflects that verification
-		// could not run. grep-style checks are exempt: their non-zero exit is
-		// the safe "no match" outcome.
-		if err != nil && !c.grepStyle {
+		// could not run.
+		if err != nil {
 			out = append(out, StaticCheck{
 				Name: c.name, Query: c.query, Passed: false,
 				Detail: "verification query failed to execute (fail-closed): " + trimmed,
@@ -865,5 +857,33 @@ func staticChecks(r vm.Runner, dom string) []StaticCheck {
 		}
 		out = append(out, StaticCheck{Name: c.name, Query: c.query, Passed: trimmed == "", Detail: trimmed})
 	}
+	out = append(out, permissiveCheck(r, dom))
 	return out
+}
+
+// permissiveCheck asserts the domain is not in the permissive list. It cannot
+// be folded into the sesearch loop: it runs semanage and greps, and grep exits
+// non-zero on the SAFE no-match path — so a piped `semanage | grep` conflates a
+// clean pass with a semanage failure and fails OPEN (review finding). Instead,
+// require semanage itself to succeed, then decide membership in Go: a semanage
+// that cannot run is unverifiable, not "not permissive".
+func permissiveCheck(r vm.Runner, dom string) StaticCheck {
+	c := StaticCheck{Name: "not permissive", Query: "semanage permissive -l (membership of " + dom + ")"}
+	out, err := r.Run("sudo semanage permissive -l 2>&1")
+	if err != nil {
+		c.Passed = false
+		c.Detail = "semanage permissive -l failed to run (fail-closed): " + strings.TrimSpace(out)
+		return c
+	}
+	for _, line := range strings.Split(out, "\n") {
+		for _, f := range strings.Fields(line) {
+			if f == dom {
+				c.Passed = false
+				c.Detail = dom + " is in the permissive list"
+				return c
+			}
+		}
+	}
+	c.Passed = true
+	return c
 }

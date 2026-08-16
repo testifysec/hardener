@@ -43,6 +43,29 @@ func TestFindCollisionsDetectsExecutables(t *testing.T) {
 	}
 }
 
+// Round 14: GenerateFC ESCAPES the executable path (spaces → \s), so the base
+// claim to match is the escaped form. Comparing the raw path missed a collision
+// like "Plex\sMedia\sServer", leaving a duplicate spec that makes semodule
+// reject the module. The collision must be found (matching escaped) yet record
+// the RAW path so exclusion still works.
+func TestFindCollisionsMatchesEscapedExecutable(t *testing.T) {
+	base := "/usr/lib/plexmediaserver/Plex\\sMedia\\sServer\t--\tsystem_u:object_r:bin_t:s0\n"
+	p := &profile.Profile{
+		Name:        "plex",
+		Executables: []string{"/usr/lib/plexmediaserver/Plex Media Server"},
+	}
+	cols := FindCollisions(p, base)
+	if len(cols) != 1 {
+		t.Fatalf("escaped-executable collision must be detected, got %+v", cols)
+	}
+	if cols[0].Path != "/usr/lib/plexmediaserver/Plex Media Server" {
+		t.Errorf("collision must record the RAW path for exclusion, got %q", cols[0].Path)
+	}
+	if fc := GenerateFCExcluding(p, cols); strings.Contains(fc, "Plex") {
+		t.Errorf("colliding spaced executable must be excluded from fc:\n%s", fc)
+	}
+}
+
 // Round 13: systemd unit files must take the shared base type so systemd can
 // load them — and so the module never emits an fc entry referencing a type it
 // never declares (app_unit_file_t was undeclared → uncompilable module).

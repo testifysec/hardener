@@ -56,6 +56,19 @@ func KindFromString(s string) Kind {
 	return KindContent
 }
 
+// KnownKind reports whether s names a valid path kind. Manifest load must
+// reject anything else instead of letting KindFromString silently fall back to
+// KindContent: content paths receive can_exec, so a typo like "confg" would
+// quietly make a configuration or state file executable (review finding).
+func KnownKind(s string) bool {
+	for _, k := range []Kind{KindExec, KindConf, KindVarLib, KindLog, KindRuntime, KindContent, KindTmp, KindCache, KindUnit} {
+		if k.String() == s {
+			return true
+		}
+	}
+	return false
+}
+
 // ClassifyPath maps a path to its semantic kind. exec marks ELF/script entrypoints.
 func ClassifyPath(path string, exec bool) Kind {
 	switch {
