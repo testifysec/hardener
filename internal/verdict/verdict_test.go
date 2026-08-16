@@ -175,3 +175,32 @@ func TestExerciseEnforcingGateRequiresBothStates(t *testing.T) {
 		t.Errorf("a fully passing run must set all three gate fields, got %+v", ok)
 	}
 }
+
+// Round 72: every declared entrypoint is labeled <app>_exec_t and bound as a
+// signed subject, but only the unit's MainPID binary is verified running under
+// enforcement. A passing verdict therefore read as if ALL of them had been
+// exercised. Requiring the sets to be equal would be wrong (multi-binary apps
+// legitimately have helpers that never become MainPID), so the predicate must
+// DISCLOSE both sets. (review finding)
+func TestCoverageDisclosesObservedVsDeclaredEntrypoints(t *testing.T) {
+	r := passingResult()
+	r.EntrypointPaths = []string{"/usr/sbin/widgetd", "/usr/libexec/widget-helper"}
+	r.EntrypointDigests = map[string]string{
+		"/usr/sbin/widgetd":          strings.Repeat("ab", 32),
+		"/usr/libexec/widget-helper": strings.Repeat("cd", 32),
+	}
+	r.ObservedEntrypoints = []string{"/usr/sbin/widgetd"} // only MainPID ran
+	cov := Build(r, Env{}, nil).Predicate.Coverage
+	if len(cov.DeclaredEntrypoints) != 2 {
+		t.Errorf("declared entrypoints = %v, want both", cov.DeclaredEntrypoints)
+	}
+	if len(cov.ObservedEntrypoints) != 1 || cov.ObservedEntrypoints[0] != "/usr/sbin/widgetd" {
+		t.Errorf("observed entrypoints = %v, want only the MainPID binary", cov.ObservedEntrypoints)
+	}
+	// The un-exercised helper must NOT appear as observed.
+	for _, o := range cov.ObservedEntrypoints {
+		if o == "/usr/libexec/widget-helper" {
+			t.Error("a helper that never ran as MainPID must not be reported as observed")
+		}
+	}
+}

@@ -130,6 +130,15 @@ type Coverage struct {
 	StaticImports bool     `json:"staticImports"`
 	Predictions   []string `json:"predictions,omitempty"`
 	Gaps          []string `json:"gaps,omitempty"`
+	// DeclaredEntrypoints are every entrypoint the profile labels <app>_exec_t and
+	// binds as a signed subject. ObservedEntrypoints are the subset actually seen
+	// EXECUTING in the app's domain under enforcement (the unit's MainPID binary).
+	// They differ legitimately for multi-binary apps whose helpers never become
+	// MainPID, so the difference is DISCLOSED rather than rejected — but it must be
+	// disclosed, or a passing verdict reads as if every declared entrypoint had run
+	// confined when only one was proven to (review finding — round 72).
+	DeclaredEntrypoints []string `json:"declaredEntrypoints,omitempty"`
+	ObservedEntrypoints []string `json:"observedEntrypoints,omitempty"`
 	// BaseGrants are the refpolicy interfaces every generated domain receives
 	// UNCONDITIONALLY (shell/bin execution, /etc and /usr reads, generic cert
 	// access, syslog). They produce no AVCs, so they are never "observed" —
@@ -233,8 +242,10 @@ func BuildOrErr(res *pipeline.Result, env Env, extra []Subject) (Statement, erro
 			Unexercised: res.ConformanceUnexer, Fatal: res.ConformanceFatal,
 		},
 		Coverage: Coverage{
-			StaticImports: res.StaticImports,
-			BaseGrants:    append([]string(nil), policy.BaseInterfaces...),
+			StaticImports:       res.StaticImports,
+			BaseGrants:          append([]string(nil), policy.BaseInterfaces...),
+			DeclaredEntrypoints: append([]string(nil), res.EntrypointPaths...),
+			ObservedEntrypoints: append([]string(nil), res.ObservedEntrypoints...),
 		},
 	}
 	for _, c := range res.StaticChecks {

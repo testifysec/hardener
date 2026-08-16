@@ -126,3 +126,54 @@ func TestBaseInterfacesOmitGenericCertRead(t *testing.T) {
 		}
 	}
 }
+
+// Round 72: KindCache received the manage_* patterns but NO type transition,
+// unlike every sibling kind. /var/cache is var_t and RPM install skips a root
+// that does not exist yet, so an app creating its own cache directory on first
+// start had it labeled var_t instead of <app>_cache_t — denied, and unable to
+// converge in the field. The transition is name-scoped to the declared cache
+// root's leaf so it does not claim everything the domain creates under var_t.
+// (Interface arity and the emitted rule were compile-verified on the verifier:
+// `type_transition widget_t var_t:dir widget_cache_t widget;`)
+func TestGenerateTEEmitsCacheFileTransition(t *testing.T) {
+	p := &profile.Profile{
+		Name:        "widget",
+		Executables: []string{"/opt/widget/bin/widgetd"},
+		Paths:       []profile.PathAccess{{Path: "/var/cache/widget(/.*)?", Kind: "cache"}},
+	}
+	te := GenerateTE(p)
+	want := `files_var_filetrans(widget_t, widget_cache_t, { dir file }, "widget")`
+	if !strings.Contains(te, want) {
+		t.Errorf("cache kind must emit a name-scoped var filetrans; missing %q in:\n%s", want, te)
+	}
+	// A profile with no cache path must not emit one.
+	p2 := &profile.Profile{
+		Name:        "widget",
+		Executables: []string{"/opt/widget/bin/widgetd"},
+		Paths:       []profile.PathAccess{{Path: "/var/lib/widget(/.*)?", Kind: "var_lib"}},
+	}
+	if strings.Contains(GenerateTE(p2), "files_var_filetrans") {
+		t.Error("a profile without a cache path must not emit a var filetrans")
+	}
+}
+
+// The transition name is the declared cache root's leaf directory, deduplicated,
+// and never carries characters that would escape the .te string literal.
+func TestCacheTransitionNames(t *testing.T) {
+	p := &profile.Profile{Paths: []profile.PathAccess{
+		{Path: "/var/cache/widget(/.*)?", Kind: "cache"},
+		{Path: "/var/cache/widget2", Kind: "cache"},
+		{Path: "/var/cache/widget(/.*)?", Kind: "cache"}, // duplicate leaf
+		{Path: "/var/lib/widget(/.*)?", Kind: "var_lib"}, // not a cache path
+	}}
+	got := cacheTransitionNames(p)
+	want := []string{"widget", "widget2"}
+	if len(got) != len(want) {
+		t.Fatalf("cacheTransitionNames = %v, want %v", got, want)
+	}
+	for i := range want {
+		if got[i] != want[i] {
+			t.Errorf("cacheTransitionNames[%d] = %q, want %q", i, got[i], want[i])
+		}
+	}
+}

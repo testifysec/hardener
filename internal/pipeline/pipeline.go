@@ -71,6 +71,13 @@ type Result struct {
 	// must bind EVERY resolved entrypoint and no unrelated path — recorded
 	// independently of the digest loop so a future omission there is caught.
 	EntrypointPaths []string
+	// ObservedEntrypoints are the entrypoints actually seen EXECUTING in the app's
+	// domain under enforcement (the unit's MainPID binary). Every declared
+	// entrypoint is labeled and bound as a signed subject, but only these were
+	// proven to run confined — helpers that never become MainPID (a transcoder, a
+	// scanner) are declared-and-labeled, not exercised. The predicate reports both
+	// sets so a passing verdict cannot imply coverage it does not have.
+	ObservedEntrypoints []string
 	// Conformance is filled by the caller per party class; rendered in the report.
 	Party             string
 	ConformanceUndecl []string
@@ -767,6 +774,18 @@ func Run(r vm.Runner, t *target.Target, opts Options) *Result {
 			if run.ExeDigest != want {
 				return fail("running-exe-mismatch", fmt.Errorf(
 					"running binary %s has digest %s but the declared entrypoint digest is %s", run.ExePath, run.ExeDigest, want))
+			}
+			// Record which entrypoints were actually OBSERVED executing in our
+			// domain under enforcement. Every declared entrypoint is labeled
+			// <app>_exec_t and bound as a signed subject, but only the unit's
+			// MainPID binary is verified here — so the predicate implied all of
+			// them had been exercised when helpers that never run as MainPID
+			// (plex's transcoder, scanner) had not (review finding — round 72).
+			// Requiring the observed set to EQUAL the declared set would be wrong:
+			// multi-binary apps legitimately exercise helpers out-of-band. Disclose
+			// the difference instead of rejecting it.
+			if !slices.Contains(res.ObservedEntrypoints, run.ExePath) {
+				res.ObservedEntrypoints = append(res.ObservedEntrypoints, run.ExePath)
 			}
 		}
 		res.EnforceOK = exOK && len(denials) == 0 && res.DomainOK
