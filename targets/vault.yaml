@@ -22,7 +22,10 @@ setup: |
   sudo mkdir -p /etc/vault /var/lib/vault
   sudo tee /etc/vault/vault.hcl > /dev/null <<'EOF'
   storage "file" { path = "/var/lib/vault" }
-  listener "tcp" { address = "127.0.0.1:8200" tls_disable = true }
+  listener "tcp" {
+    address     = "127.0.0.1:8200"
+    tls_disable = true
+  }
   disable_mlock = true
   ui = false
   EOF

@@ -155,11 +155,31 @@ func Run(r vm.Runner, t *target.Target, opts Options) *Result {
 	// hardening `sshd`, whose sshd_t the base policy already defines). This is
 	// the automated form of the documented "already confined" exclusion; run on
 	// a clean verifier. sesearch returns rules only for a type that exists.
-	nameConflict := func() bool {
-		out, err := r.Run(fmt.Sprintf("sesearch -A -s %s -c process 2>/dev/null | head -1", dom))
-		return err == nil && strings.TrimSpace(out) != ""
+	// Detect a pre-existing SELinux type. The previous check piped sesearch to
+	// `head`, so the pipeline exit status was head's (always 0) and a sesearch
+	// FAILURE looked like "no conflict" — fail open; it also only found types
+	// that had a process ALLOW rule, missing a bare type declaration (review
+	// finding). Query the type DIRECTLY with seinfo, cross-check with sesearch,
+	// and fail closed only when NEITHER tool can run.
+	nameConflict := func() (bool, error) {
+		out, err := r.Run(fmt.Sprintf("seinfo -t %s 2>/dev/null", dom))
+		if err == nil && strings.Contains(out, dom) {
+			return true, nil // the type is defined → conflict
+		}
+		out2, err2 := r.Run(fmt.Sprintf("sesearch -A -s %s -c process 2>/dev/null", dom))
+		if err2 == nil && strings.TrimSpace(out2) != "" {
+			return true, nil // a process rule for the type exists → conflict
+		}
+		if err != nil && err2 != nil {
+			// Neither seinfo nor sesearch could run — we cannot trust an "absent"
+			// answer and must not risk shadowing an existing module.
+			return false, fmt.Errorf("cannot query SELinux type %s (seinfo and sesearch both failed) — refusing to risk shadowing an existing policy", dom)
+		}
+		return false, nil
 	}
-	if nameConflict() {
+	if conflict, err := nameConflict(); err != nil {
+		return fail("name-conflict-query", err)
+	} else if conflict {
 		return fail("name-conflict", fmt.Errorf(
 			"SELinux type %s already exists on the verifier — %s is already confined by an existing policy (or its name collides with distro policy); hardener will not shadow it. Use a distinct name or a clean verifier", dom, t.Name))
 	}
@@ -184,7 +204,9 @@ func Run(r vm.Runner, t *target.Target, opts Options) *Result {
 	// our domain type. The pre-install check could not see it, and proceeding
 	// would shadow or replace that module (and rollback would remove it) — refuse
 	// instead (review finding).
-	if nameConflict() {
+	if conflict, err := nameConflict(); err != nil {
+		return fail("name-conflict-query-post-install", err)
+	} else if conflict {
 		return fail("name-conflict-post-install", fmt.Errorf(
 			"SELinux type %s appeared after installing %s — the artifact ships its own policy for this type; hardener will not shadow or replace it. Use a distinct name or exclude the vendor policy", dom, t.Name))
 	}
@@ -231,6 +253,19 @@ func Run(r vm.Runner, t *target.Target, opts Options) *Result {
 		if !isAppOwnedExecutable(p, real) {
 			opts.Log("[%s] entrypoint %s is not positively app-owned — refusing to label a shared binary; declare the real entrypoint in the manifest", t.Name, real)
 			continue
+		}
+		// readlink -f resolves SYMLINKS but not HARD links. An app-owned path can
+		// be hard-linked to a shared system binary (/usr/bin/bash); restorecon
+		// would then relabel the shared inode as the app exec type, affecting every
+		// other link to it (review finding). Refuse an entrypoint whose inode has
+		// more than one link — we cannot prove all links are app-owned. (Only acted
+		// on when stat returns a parseable count > 1, so a stat-less environment is
+		// not spuriously blocked.)
+		if lc, err := r.Run(fmt.Sprintf("stat -c %%h -- %s", vm.ShellQuote(real))); err == nil {
+			if n, perr := strconv.Atoi(strings.TrimSpace(lc)); perr == nil && n > 1 {
+				opts.Log("[%s] entrypoint %s has %d hard links — refusing to label a shared inode that other links would inherit", t.Name, real, n)
+				continue
+			}
 		}
 		if !seen[real] {
 			seen[real] = true
@@ -804,6 +839,10 @@ func exercise(r vm.Runner, t *target.Target, dom string) ([]avc.Denial, bool, ru
 		return nil, false, runInfo{}, fmt.Errorf("audit log stat: unexpected %q", pre)
 	}
 	offset, startInode := preFields[0], preFields[1]
+	// Snapshot the kernel audit LOSS counter. If it climbs during the window the
+	// kernel dropped audit records on buffer overflow, so a zero-denial slice is
+	// not trustworthy — the missing records could be our AVCs (review finding).
+	lost0, lostOK0 := auditLost(r)
 	if _, err := r.Run("sudo systemctl reset-failed " + t.Unit + " 2>/dev/null; true"); err != nil {
 		return nil, false, runInfo{}, err
 	}
@@ -835,6 +874,15 @@ func exercise(r vm.Runner, t *target.Target, dom string) ([]avc.Denial, bool, ru
 		}
 	}
 	_, _ = r.Run(fmt.Sprintf("sudo systemctl stop %s 2>/dev/null; true", t.Unit))
+	// Drain barrier: the process is dead, so no NEW records are generated; give
+	// auditd's backlog a bounded chance to flush pending records to disk before we
+	// read, so a late-written AVC is not missed as a false zero-denial (review
+	// finding). Each probe is a round-trip, so no sleep is needed; best-effort.
+	for i := 0; i < 5; i++ {
+		if bl, ok := auditBacklog(r); !ok || bl == 0 {
+			break
+		}
+	}
 	// Fail closed on log rotation/truncation: a new inode or a shrunk file
 	// means our byte offset is stale and a plain tail would silently miss AVC
 	// records, reporting a false zero-denial pass (review finding).
@@ -872,6 +920,13 @@ func exercise(r vm.Runner, t *target.Target, dom string) ([]avc.Denial, bool, ru
 	}
 	if strings.TrimSpace(post2) != startInode {
 		return nil, exOK, run, fmt.Errorf("audit log rotated during read (inode %s→%s) — re-run", startInode, strings.TrimSpace(post2))
+	}
+	// If the kernel dropped audit records during the window, the slice we just
+	// read may be missing AVCs — a zero-denial result would be a false pass. Only
+	// enforced when both snapshots were readable (auditctl present) so a
+	// stat/audit-less environment is not spuriously blocked (review finding).
+	if lost1, lostOK1 := auditLost(r); lostOK0 && lostOK1 && lost1 > lost0 {
+		return nil, exOK, run, fmt.Errorf("kernel audit records were lost during the exercise (lost %d→%d) — the denial set is incomplete; re-run on a less loaded verifier", lost0, lost1)
 	}
 	for _, te := range avc.ParseTransitionErrors(out) {
 		if te.NewType == dom {
@@ -915,6 +970,35 @@ func captureRunInfo(r vm.Runner, unit string) runInfo {
 			`else echo NO_PID; fi`, unit))
 	return parseRunInfo(out)
 }
+
+// auditStatusField parses one integer field ("lost", "backlog", ...) out of
+// `auditctl -s` output, which prints space- or newline-separated "key value"
+// pairs (older builds use "key=value"). Returns ok=false when auditctl cannot
+// be queried or the field is absent, so callers can skip the check rather than
+// fail on a verifier without audit tooling.
+func auditStatusField(r vm.Runner, field string) (int, bool) {
+	out, err := r.Run("sudo auditctl -s 2>/dev/null")
+	if err != nil || strings.TrimSpace(out) == "" {
+		return 0, false
+	}
+	f := strings.Fields(out)
+	for i, tok := range f {
+		if tok == field && i+1 < len(f) {
+			if n, e := strconv.Atoi(f[i+1]); e == nil {
+				return n, true
+			}
+		}
+		if strings.HasPrefix(tok, field+"=") {
+			if n, e := strconv.Atoi(strings.TrimPrefix(tok, field+"=")); e == nil {
+				return n, true
+			}
+		}
+	}
+	return 0, false
+}
+
+func auditLost(r vm.Runner) (int, bool)    { return auditStatusField(r, "lost") }
+func auditBacklog(r vm.Runner) (int, bool) { return auditStatusField(r, "backlog") }
 
 // labelType extracts the SELinux type from a user:role:type:level context so a
 // confined→unconfined transition is detected even when the binary is unchanged.
