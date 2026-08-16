@@ -13,7 +13,6 @@ base_grants:
     - corecmd_exec_shell
     - libs_exec_ldconfig
     - miscfiles_read_localization
-    - miscfiles_read_generic_certs
     - logging_send_syslog_msg
     - files_read_etc_files
     - files_read_usr_files

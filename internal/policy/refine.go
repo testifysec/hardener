@@ -105,11 +105,19 @@ var safeCapabilities = map[string]bool{
 	"net_bind_service": true,
 }
 
-// dangerousProcessPerms are high-impact permissions on the process class:
-// executable memory (defeats W^X), stack/heap exec, and ptrace. They are not
-// capability-class, so the capability-only check missed them.
-var dangerousProcessPerms = map[string]bool{
-	"execmem": true, "execstack": true, "execheap": true, "ptrace": true,
+// safeProcessPerms is a fail-closed ALLOWLIST of process/process2 permissions a
+// normal daemon needs on ITSELF. Everything else — setexec, setcurrent,
+// setfscreate, setkeycreate, setsockcreate, setcap, execmem/execstack/execheap,
+// ptrace, dyntransition, ... — is a context/process-manipulation privilege that
+// must go to human review. A blocklist missed those (same-domain targets count
+// as owned, so they bypassed the foreign-type gate and auto-emitted) (review
+// finding).
+var safeProcessPerms = map[string]bool{
+	"fork": true, "sigchld": true, "sigkill": true, "sigstop": true,
+	"signull": true, "signal": true, "getsched": true, "setsched": true,
+	"getpgid": true, "setpgid": true, "getsession": true, "getcap": true,
+	"share": true, "getattr": true, "setrlimit": true, "getrlimit": true,
+	"noatsecure": true, "siginh": true, "rlimitinh": true, "transition": true,
 }
 
 var dangerousTargets = map[string]bool{
@@ -250,8 +258,8 @@ func dangerReason(r AllowRule) string {
 	}
 	if r.Class == "process" || r.Class == "process2" {
 		for _, p := range r.Perms {
-			if dangerousProcessPerms[p] {
-				return "high-impact process permission: " + p
+			if !safeProcessPerms[p] {
+				return "process permission requiring review: " + p
 			}
 		}
 	}
