@@ -24,14 +24,28 @@ cp /tmp/hardener/%[1]s/%[1]s.pp ~/rpmbuild/SOURCES/
 cp /tmp/hardener/%[1]s/%[1]s.fc ~/rpmbuild/SOURCES/
 cp /tmp/hardener/%[1]s/%[1]s-selinux.spec ~/rpmbuild/SPECS/
 rpmbuild -bb ~/rpmbuild/SPECS/%[1]s-selinux.spec
-ls ~/rpmbuild/RPMS/noarch/%[1]s-selinux-*.rpm
 `, app)
 	out, err := r.Run(script)
 	if err != nil {
 		return "", err
 	}
-	lines := strings.Split(strings.TrimSpace(out), "\n")
-	return lines[len(lines)-1], nil
+	// Parse rpmbuild's "Wrote: <path>" — the EXACT artifact just built. A wildcard
+	// `ls %[1]s-selinux-*.rpm` returned the lexicographically-last match, which
+	// could be a CACHED older RPM (a lower/empty revision), so the verifier could
+	// hash and publish STALE policy bytes (review finding).
+	rpmPath := ""
+	for _, line := range strings.Split(out, "\n") {
+		line = strings.TrimSpace(line)
+		if p, ok := strings.CutPrefix(line, "Wrote:"); ok {
+			if p = strings.TrimSpace(p); strings.HasSuffix(p, ".rpm") {
+				rpmPath = p
+			}
+		}
+	}
+	if rpmPath == "" {
+		return "", fmt.Errorf("could not determine the built RPM path from rpmbuild output:\n%s", out)
+	}
+	return rpmPath, nil
 }
 
 // GenerateSpec renders the RPM spec for the policy package. revision is a
@@ -77,8 +91,10 @@ func GenerateSpec(p *profile.Profile, revision string) string {
 				"_rl=$(stat -c '%%C' -- \"$_r\" 2>/dev/null); case \"$_rl\" in *:%[2]s:*) : ;; *) printf 'ERROR: declared root %%s is labeled %%s, not %[2]s — a higher-priority file-context rule is overriding it\\n' \"$_r\" \"$_rl\" >&2; exit 1 ;; esac; "+
 				// A LOCAL file-context rule UNDER our root can override the labeling on
 				// a descendant while the root itself verifies correctly (review finding).
-				// Refuse if any local customization sits under this root.
-				"if semanage fcontext -C -l 2>/dev/null | awk '{print $1}' | grep -q \"^$_r/\"; then printf 'ERROR: a local file-context rule under %%s could override the app labeling; refusing\\n' \"$_r\" >&2; exit 1; fi; fi\n",
+				// Capture the listing and FAIL CLOSED on enumeration error — piping it
+				// straight into awk|grep masked a semanage failure (review finding).
+				"_lfc=\"$(semanage fcontext -C -l 2>/dev/null)\" || { printf 'ERROR: could not enumerate local file-contexts for %%s; refusing\\n' \"$_r\" >&2; exit 1; }; "+
+				"if printf '%%s\\n' \"$_lfc\" | awk '{print $1}' | grep -q \"^$_r/\"; then printf 'ERROR: a local file-context rule under %%s could override the app labeling; refusing\\n' \"$_r\" >&2; exit 1; fi; fi\n",
 			vm.ShellQuote(root), wantType)
 	}
 	// PASS 3 — relabel + VERIFY each entrypoint. The label is load-bearing:
