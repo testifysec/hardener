@@ -143,6 +143,14 @@ var dangerousTargets = map[string]bool{
 	"selinux_config_t": true, "auth_cache_t": true, "sysctl_t": true,
 }
 
+// dangerousClasses are kernel object classes that grant capabilities far beyond
+// file access — a confined daemon almost never legitimately needs them, and each
+// is a well-known privilege-escalation / sandbox-escape surface. Any denial of
+// these classes goes to review regardless of target ownership.
+var dangerousClasses = map[string]bool{
+	"bpf": true, "perf_event": true, "io_uring": true,
+}
+
 // genericTargets are broad shared types owned by no single application.
 // Granting a confined domain access to one re-opens access to every other
 // application's files carrying that label — the precise over-permission
@@ -283,6 +291,17 @@ func dangerReason(r AllowRule) string {
 				return "process permission requiring review: " + p
 			}
 		}
+	}
+	// Powerful kernel object classes — BPF program/map ops, perf_event, io_uring —
+	// grant capabilities far beyond file access and are classic privilege-
+	// escalation / sandbox-escape surfaces. The foreign-type gate never sees an
+	// OWNED self-target (a widget_t:widget_t:bpf prog_load denial), and the checks
+	// above only inspect capability/process classes, so such a rule auto-applied
+	// unreviewed. Flag ANY access to these classes regardless of target; a daemon
+	// that genuinely needs it gets a reviewed, explicitly-accepted rule (review
+	// finding).
+	if dangerousClasses[r.Class] {
+		return "privileged object class requiring review: " + r.Class
 	}
 	if genericTargets[r.Target] {
 		return "broad shared type (grants access to other applications' files): " + r.Target
