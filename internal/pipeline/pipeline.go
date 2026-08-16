@@ -688,6 +688,16 @@ func Run(r vm.Runner, t *target.Target, opts Options) *Result {
 		return fail("verifier-integrity", err)
 	}
 
+	// Cross-round W^X scan over the FINAL accumulated rules. Refine flags
+	// write+execute per denial and per suffix bucket, but it sees one round at a
+	// time: a write observed in one round and an execute in another merge into a
+	// single owned-type rule that no round flagged, and a hybrid type like _conf_t
+	// matches none of the suffix buckets at all. Scan the union that actually
+	// ships; a resulting flag fails the verdict closed unless accepted (below /
+	// IsFailure). Placed before the accepted-map is built so AcceptFlagged treats
+	// it as an acknowledged exception, not a silent hole (review finding).
+	res.Flags = append(res.Flags, policy.FlagWriteExecRules(p, extraRules)...)
+
 	// 5. Static least-privilege assertions (the negative tests). A failing
 	// check whose offending rule is one we flagged and consciously accepted is
 	// an acknowledged exception, not a silent hole — report it as such.

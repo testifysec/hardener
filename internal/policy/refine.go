@@ -297,6 +297,47 @@ func dangerReason(r AllowRule) string {
 	return ""
 }
 
+// hasWriteExec reports whether perms grant BOTH a content-modifying permission
+// and an execute permission — the write-xor-execute invariant violated, i.e. a
+// code-injection primitive. execute/execute_no_trans are the X; anything that is
+// not a read-only permission (and readOnlyPerms already classes the execute
+// perms as read-only, so they can't count as W) is the W.
+func hasWriteExec(perms []string) bool {
+	exec, write := false, false
+	for _, p := range perms {
+		switch {
+		case p == "execute" || p == "execute_no_trans":
+			exec = true
+		case !readOnlyPerms[p]:
+			write = true
+		}
+	}
+	return exec && write
+}
+
+// FlagWriteExecRules scans a fully ACCUMULATED rule set for owned file types that
+// hold both write and execute. It is the cumulative counterpart to the per-denial
+// self-modification and writable-type checks in Refine, which see one round at a
+// time and are keyed to specific suffixes (_content_t/_exec_t and the writable
+// data suffixes). Those miss two things this catches: a hybrid owned type like
+// _conf_t (executable, app-writable configuration) that matches no suffix bucket,
+// and a write granted in one refinement round with an execute granted in another
+// — each round auto-applying an innocuous half while the union is a W^X violation.
+// A returned flag fails the verdict closed unless explicitly accepted. (review finding)
+func FlagWriteExecRules(p *profile.Profile, rules []AllowRule) []Flag {
+	own := ownTypes(p)
+	var flags []Flag
+	for _, r := range rules {
+		if own[r.Target] && isFileClass(r.Class) && hasWriteExec(r.Perms) {
+			flags = append(flags, Flag{
+				Reason: "cumulative write+execute on an owned type (W^X violation): " + r.Target,
+				Rule:   r,
+			})
+		}
+	}
+	return flags
+}
+
 // isLauncherDomain covers the systemd/init domains that perform the
 // exec-time domain transition for a service unit.
 func isLauncherDomain(t string) bool {
