@@ -148,6 +148,18 @@ func Run(r vm.Runner, t *target.Target, opts Options) *Result {
 		}
 	}
 
+	// Refuse to SHADOW an existing SELinux policy. If the domain type already
+	// exists before we install anything, a distro (or a leftover) module owns
+	// this name — generating a minimal module under the same name would shadow
+	// the real one and quietly weaken confinement (review finding: e.g.
+	// hardening `sshd`, whose sshd_t the base policy already defines). This is
+	// the automated form of the documented "already confined" exclusion; run on
+	// a clean verifier. sesearch returns rules only for a type that exists.
+	if out, err := r.Run(fmt.Sprintf("sesearch -A -s %s -c process 2>/dev/null | head -1", dom)); err == nil && strings.TrimSpace(out) != "" {
+		return fail("name-conflict", fmt.Errorf(
+			"SELinux type %s already exists on the verifier — %s is already confined by an existing policy (or its name collides with distro policy); hardener will not shadow it. Use a distinct name or a clean verifier", dom, t.Name))
+	}
+
 	// 1. Install the application.
 	opts.Log("[%s] installing", t.Name)
 	if _, err := r.Run("set -e\n" + t.Install); err != nil {
@@ -433,13 +445,35 @@ func Run(r vm.Runner, t *target.Target, opts Options) *Result {
 		return fail("un-permissive", err)
 	}
 	for attempt := 1; ; attempt++ {
-		denials, exOK, label, err := exercise(r, t, dom)
+		denials, exOK, run, err := exercise(r, t, dom)
 		if err != nil {
 			return fail("enforce-exercise", err)
 		}
 		res.ExerciseOK = exOK
 		res.ResidualAVCs = denials
-		res.DomainOK = strings.Contains(label, ":"+dom+":")
+		res.DomainOK = strings.Contains(run.Label, ":"+dom+":")
+		// Bind the bytes that ACTUALLY ran: DomainOK only proves the MainPID
+		// carries our domain label, not that the running binary is one of the
+		// entrypoints we hashed. A stale *_exec_t label, an omitted executable,
+		// or an ExecStart parse miss could run different bytes while the verdict
+		// binds unrelated digests (review finding). When the process is in our
+		// domain, its /proc/$pid/exe MUST be a declared entrypoint with the
+		// digest we captured.
+		if res.DomainOK && exOK {
+			if run.ExePath == "" || run.ExeDigest == "" {
+				return fail("running-exe-unverified", fmt.Errorf(
+					"process runs in %s but its running binary could not be captured (exe=%q sha=%q)", dom, run.ExePath, run.ExeDigest))
+			}
+			want, ok := res.EntrypointDigests[run.ExePath]
+			if !ok {
+				return fail("running-exe-unbound", fmt.Errorf(
+					"running binary %s is not a declared entrypoint (declared: %v) — the verdict would bind bytes that were not exercised", run.ExePath, sortedKeys(res.EntrypointDigests)))
+			}
+			if run.ExeDigest != want {
+				return fail("running-exe-mismatch", fmt.Errorf(
+					"running binary %s has digest %s but the declared entrypoint digest is %s", run.ExePath, run.ExeDigest, want))
+			}
+		}
 		res.EnforceOK = exOK && len(denials) == 0 && res.DomainOK
 		if res.EnforceOK || attempt >= 3 || !res.DomainOK {
 			break
@@ -718,29 +752,47 @@ func reconcileStalePorts(r vm.Runner, p *profile.Profile) {
 	}
 }
 
+// runInfo captures what the MainPID actually was during the exercise window:
+// its SELinux label AND the resolved path + digest of the running binary. The
+// digest lets the verdict bind the bytes that REALLY ran, not just the
+// manifest-derived list (review finding).
+type runInfo struct {
+	Label     string
+	ExePath   string
+	ExeDigest string
+}
+
 // exercise restarts the unit, runs the scenario script, stops the unit, and
 // returns the domain's AVC denials observed during the window. Denials are
 // captured by byte offset into audit.log — ausearch time filtering proved
 // unreliable (returned "no matches" with matching records present).
-func exercise(r vm.Runner, t *target.Target, dom string) ([]avc.Denial, bool, string, error) {
+func exercise(r vm.Runner, t *target.Target, dom string) ([]avc.Denial, bool, runInfo, error) {
 	pre, err := r.Run("sudo stat -c '%s %i' /var/log/audit/audit.log")
 	if err != nil {
-		return nil, false, "", fmt.Errorf("audit log offset: %w", err)
+		return nil, false, runInfo{}, fmt.Errorf("audit log offset: %w", err)
 	}
 	preFields := strings.Fields(strings.TrimSpace(pre))
 	if len(preFields) != 2 {
-		return nil, false, "", fmt.Errorf("audit log stat: unexpected %q", pre)
+		return nil, false, runInfo{}, fmt.Errorf("audit log stat: unexpected %q", pre)
 	}
 	offset, startInode := preFields[0], preFields[1]
 	if _, err := r.Run("sudo systemctl reset-failed " + t.Unit + " 2>/dev/null; true"); err != nil {
-		return nil, false, "", err
+		return nil, false, runInfo{}, err
 	}
 	_, startErr := r.Run(fmt.Sprintf("sudo systemctl restart %s", t.Unit))
 	exOK := startErr == nil
-	var label string
+	var run runInfo
 	if exOK {
-		label, _ = r.Run(fmt.Sprintf(
-			`pid=$(systemctl show -p MainPID --value %s); if [ "$pid" -gt 0 ] 2>/dev/null; then ps -o label= -p "$pid"; else echo NO_PID; fi`, t.Unit))
+		// Capture the label AND the running binary (resolved path + digest) from
+		// the SAME MainPID, in one shot while the service is up — the service is
+		// stopped below, so /proc/$pid/exe is gone afterward.
+		out, _ := r.Run(fmt.Sprintf(
+			`pid=$(systemctl show -p MainPID --value %s); if [ "$pid" -gt 0 ] 2>/dev/null; then `+
+				`printf 'LABEL:%%s\n' "$(ps -o label= -p "$pid")"; `+
+				`printf 'EXE:%%s\n' "$(sudo readlink -f /proc/$pid/exe 2>/dev/null)"; `+
+				`printf 'EXESHA:%%s\n' "$(sudo sha256sum /proc/$pid/exe 2>/dev/null | awk '{print $1}')"; `+
+				`else echo NO_PID; fi`, t.Unit))
+		run = parseRunInfo(out)
 		_, exErr := r.Run("set -e\n" + t.Exercise)
 		exOK = exErr == nil
 	}
@@ -750,14 +802,14 @@ func exercise(r vm.Runner, t *target.Target, dom string) ([]avc.Denial, bool, st
 	// records, reporting a false zero-denial pass (review finding).
 	post, err := r.Run("sudo stat -c '%s %i' /var/log/audit/audit.log")
 	if err != nil {
-		return nil, exOK, label, fmt.Errorf("audit log re-stat: %w", err)
+		return nil, exOK, run, fmt.Errorf("audit log re-stat: %w", err)
 	}
 	postFields := strings.Fields(strings.TrimSpace(post))
 	if len(postFields) != 2 || postFields[1] != startInode {
-		return nil, exOK, label, fmt.Errorf("audit log rotated during exercise (inode %s→%v) — re-run", startInode, postFields)
+		return nil, exOK, run, fmt.Errorf("audit log rotated during exercise (inode %s→%v) — re-run", startInode, postFields)
 	}
 	if sizeShrank(offset, postFields[0]) {
-		return nil, exOK, label, fmt.Errorf("audit log truncated during exercise (%s→%s bytes) — re-run", offset, postFields[0])
+		return nil, exOK, run, fmt.Errorf("audit log truncated during exercise (%s→%s bytes) — re-run", offset, postFields[0])
 	}
 	// Capture the RAW slice — do not pre-filter with `grep -E '^type=...'`. On a
 	// host with auditd name_format set, every record is prefixed with
@@ -769,11 +821,11 @@ func exercise(r vm.Runner, t *target.Target, dom string) ([]avc.Denial, bool, st
 	// "no denials" result (review finding).
 	out, err := r.Run(fmt.Sprintf(`sudo tail -c +%s /var/log/audit/audit.log 2>/dev/null`, "$(("+offset+"+1))"))
 	if err != nil {
-		return nil, exOK, label, fmt.Errorf("reading audit slice: %w", err)
+		return nil, exOK, run, fmt.Errorf("reading audit slice: %w", err)
 	}
 	for _, te := range avc.ParseTransitionErrors(out) {
 		if te.NewType == dom {
-			return nil, exOK, label, fmt.Errorf(
+			return nil, exOK, run, fmt.Errorf(
 				"kernel refused the domain transition into %s (%s from %s) — the unit almost certainly sets NoNewPrivileges=yes",
 				te.NewType, te.Op, te.OldType)
 		}
@@ -789,7 +841,34 @@ func exercise(r vm.Runner, t *target.Target, dom string) ([]avc.Denial, bool, st
 			mine = append(mine, d)
 		}
 	}
-	return mine, exOK, label, nil
+	return mine, exOK, run, nil
+}
+
+func sortedKeys(m map[string]string) []string {
+	ks := make([]string, 0, len(m))
+	for k := range m {
+		ks = append(ks, k)
+	}
+	sort.Strings(ks)
+	return ks
+}
+
+// parseRunInfo pulls the LABEL/EXE/EXESHA lines out of the capture command's
+// output. NO_PID or a missing line simply leaves that field empty.
+func parseRunInfo(out string) runInfo {
+	var ri runInfo
+	for _, line := range strings.Split(out, "\n") {
+		line = strings.TrimSpace(line)
+		switch {
+		case strings.HasPrefix(line, "LABEL:"):
+			ri.Label = strings.TrimSpace(strings.TrimPrefix(line, "LABEL:"))
+		case strings.HasPrefix(line, "EXE:"):
+			ri.ExePath = strings.TrimSpace(strings.TrimPrefix(line, "EXE:"))
+		case strings.HasPrefix(line, "EXESHA:"):
+			ri.ExeDigest = strings.TrimSpace(strings.TrimPrefix(line, "EXESHA:"))
+		}
+	}
+	return ri
 }
 
 // mergeNewRules merges freshly observed rules into the accumulated set,
