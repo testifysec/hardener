@@ -4,6 +4,7 @@ import (
 	"strings"
 	"testing"
 
+	"github.com/testifysec/hardener/internal/profile"
 	"github.com/testifysec/hardener/internal/target"
 )
 
@@ -74,5 +75,20 @@ func TestSpecFreshInstallRefusesPreexistingModule(t *testing.T) {
 	spec := GenerateSpec(testTarget().Profile(), "20260101000000")
 	if !strings.Contains(spec, "semodule -l") || !strings.Contains(spec, "fresh install") {
 		t.Errorf("%%post must refuse a pre-existing module on fresh install:\n%s", spec)
+	}
+}
+
+// Round 28: stale-port reconciliation must FAIL CLOSED if `semanage port -l`
+// cannot enumerate — inlining it in $(...) would yield an empty loop and let
+// obsolete <app>_port_t mappings (undeclared bind privilege) survive.
+func TestSpecPortReconcileFailsClosedOnEnumError(t *testing.T) {
+	p := testTarget().Profile()
+	p.Ports = []profile.Port{{Proto: "tcp", Port: 8443}}
+	spec := GenerateSpec(p, "20260101000000")
+	if !strings.Contains(spec, "_portlist=") {
+		t.Errorf("reconcile must capture the listing before iterating:\n%s", spec)
+	}
+	if !strings.Contains(spec, "'semanage port -l' failed") {
+		t.Errorf("reconcile must abort on an enumeration failure:\n%s", spec)
 	}
 }

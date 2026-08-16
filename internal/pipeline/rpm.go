@@ -82,8 +82,15 @@ func GenerateSpec(p *profile.Profile, revision string) string {
 	// including for an empty desired set — so a dropped port is removed rather
 	// than kept as undeclared bind privilege (review finding). Each removed
 	// mapping is recorded in _pruned so rollback can restore it.
+	// Capture the port listing and FAIL CLOSED if enumeration fails. Inlining
+	// `$(semanage port -l | awk ...)` fails open: if `semanage port -l` errors,
+	// the substitution is empty, the loop skips, and stale <app>_port_t mappings
+	// (undeclared bind privilege) survive the upgrade (review finding). semanage
+	// always lists many rows, so empty output is itself an enumeration failure.
 	reconcile := fmt.Sprintf(
-		"for _row in $(semanage port -l | awk '$1==\"%[1]s\"{for(i=3;i<=NF;i++){gsub(\",\",\"\",$i); print $2\":\"$i}}'); do "+
+		"_portlist=\"$(semanage port -l 2>/dev/null)\" || { echo \"ERROR: 'semanage port -l' failed during %[1]s port reconciliation; refusing to risk leaving an undeclared bind privilege\" >&2; exit 1; }\n"+
+			"if [ -z \"$_portlist\" ]; then echo \"ERROR: 'semanage port -l' returned no output during %[1]s reconciliation; refusing to proceed\" >&2; exit 1; fi\n"+
+			"for _row in $(printf '%%s\\n' \"$_portlist\" | awk '$1==\"%[1]s\"{for(i=3;i<=NF;i++){gsub(\",\",\"\",$i); print $2\":\"$i}}'); do "+
 			"case \"%[2]s\" in *\" $_row \"*) : ;; "+
 			"*) _pp=${_row%%%%:*}; _pn=${_row##*:}; "+
 			"if semanage port -d -t %[1]s -p \"$_pp\" \"$_pn\" 2>/dev/null; then _pruned=\"$_pruned $_row\"; "+

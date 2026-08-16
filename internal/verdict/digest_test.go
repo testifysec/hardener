@@ -172,8 +172,16 @@ func TestVerdictFailsOnUndeclaredWithoutFatal(t *testing.T) {
 		t.Errorf("undeclared second-party behavior must fail closed, got %q", st.Predicate.Verdict)
 	}
 	// A THIRD-party artifact's undeclared behavior stays advisory (not fatal).
+	// Set BOTH party fields so BuildOrErr does not reject on a party mismatch —
+	// otherwise the zero-value statement passes the assertion vacuously (review
+	// finding on the earlier version of this test).
 	r.Party = "third"
-	if st, _ := BuildOrErr(r, Env{}, []Subject{{Name: "x", SHA256: goodSHA}}); st.Predicate.Verdict == "fail" {
+	r.Target.Party = "third"
+	st, err = BuildOrErr(r, Env{}, []Subject{{Name: "x", SHA256: goodSHA}})
+	if err != nil {
+		t.Fatalf("third-party build must not error: %v", err)
+	}
+	if st.Predicate.Verdict == "fail" {
 		t.Error("third-party undeclared behavior is advisory, must not fail")
 	}
 }
