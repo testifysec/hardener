@@ -896,12 +896,16 @@ func exercise(r vm.Runner, t *target.Target, dom string) ([]avc.Denial, bool, ru
 			}
 		}
 	}
-	stopErr := func() error { _, e := r.Run(fmt.Sprintf("sudo systemctl stop %s", t.Unit)); return e }()
-	// The unit must actually be stopped: a still-running process could keep
-	// generating (or hide) records outside our window. Verify inactivity and fail
-	// closed rather than discarding the stop error (review finding).
-	if act, _ := r.Run(fmt.Sprintf("systemctl is-active %s", t.Unit)); hasLine(act, "active") {
-		return nil, exOK, run, fmt.Errorf("unit %s did not stop after the exercise (%s, err=%v) — cannot bound the observation window", t.Unit, strings.TrimSpace(act), stopErr)
+	_, stopErr := r.Run(fmt.Sprintf("sudo systemctl stop %s", t.Unit))
+	// The unit must actually be stopped: any RUNNING or TRANSITIONAL state
+	// (active/activating/deactivating/reloading) can keep generating AVCs after we
+	// read the slice — a false zero-denial. Checking only the exact line "active"
+	// missed the transitional states (review finding). Only "inactive"/"failed"
+	// (or an unknown/empty answer on a stubbed environment) are treated as stopped.
+	actOut, _ := r.Run(fmt.Sprintf("systemctl is-active %s", t.Unit))
+	switch strings.TrimSpace(actOut) {
+	case "active", "activating", "deactivating", "reloading":
+		return nil, exOK, run, fmt.Errorf("unit %s is %q after the exercise (not cleanly stopped, stopErr=%v) — it may still generate denials outside the observed window", t.Unit, strings.TrimSpace(actOut), stopErr)
 	}
 	// Drain barrier: the process is dead, so no NEW records are generated; give
 	// auditd's backlog a bounded chance to flush pending records to disk before we
