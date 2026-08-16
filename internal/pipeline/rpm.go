@@ -143,10 +143,15 @@ func GenerateSpec(p *profile.Profile, revision string) string {
 				// literal root EQUALS ours, is an ANCESTOR of ours (/var/lib(/.*)? over
 				// /var/lib/widget), or a DESCENDANT (a rule under our root). The earlier
 				// `grep "^$_r/"` caught only descendants, missing exact and ancestor rules
-				// that also override our labeling (review finding). awk strips a trailing
-				// (/.*)? with pure string ops (no fragile nested regex) and compares with
-				// slash-normalized index() in both directions.
-				"_ov=$(printf '%%s\\n' \"$_lfc\" | awk -v r=\"$_r\" '$1 ~ /^\\// { p=$1; if (length(p)>=6 && substr(p,length(p)-5)==\"(/.*)?\") p=substr(p,1,length(p)-6); while (length(p)>1 && substr(p,length(p),1)==\"/\") p=substr(p,1,length(p)-1); if (p==\"\") next; rp=r\"/\"; pp=p\"/\"; if (p==r || index(rp,pp)==1 || index(pp,rp)==1) { print p; exit } }'); "+
+				// that also override our labeling (review finding). To compare a REGEX
+				// local entry against our literal root, reduce it to its LITERAL STEM —
+				// truncate at the first regex metacharacter — so ANY regex form collapses
+				// to its fixed prefix: stripping only the exact `(/.*)?` suffix let an
+				// ancestor like `/var/lib(/.+)?` (or `/var/lib/.*`, `/var/lib[0-9]`)
+				// bypass the check and silently override our labels on a not-yet-created
+				// root (review finding — round 67). Over-detection here is deliberate and
+				// fails closed. Compare with slash-normalized index() in both directions.
+				"_ov=$(printf '%%s\\n' \"$_lfc\" | awk -v r=\"$_r\" '$1 ~ /^\\// { p=$1; m=match(p, /[].^$*+?(){}|[\\\\]/); if (m>0) p=substr(p,1,m-1); while (length(p)>1 && substr(p,length(p),1)==\"/\") p=substr(p,1,length(p)-1); if (p==\"\") next; rp=r\"/\"; pp=p\"/\"; if (p==r || index(rp,pp)==1 || index(pp,rp)==1) { print p; exit } }'); "+
 				"if [ -n \"$_ov\" ]; then printf 'ERROR: a local file-context rule (%%s) overlaps declared root %%s — it could override the app labeling; refusing\\n' \"$_ov\" \"$_r\" >&2; exit 1; fi\n"+
 				"if [ -e \"$_r\" ]; then restorecon -RF -- \"$_r\" || { printf 'ERROR: could not relabel declared root %%s; refusing to leave it under a broader label\\n' \"$_r\" >&2; exit 1; }; "+
 				"_rl=$(stat -c '%%C' -- \"$_r\" 2>/dev/null); case \"$_rl\" in *:%[2]s:*) : ;; *) printf 'ERROR: declared root %%s is labeled %%s, not %[2]s — a higher-priority file-context rule is overriding it\\n' \"$_r\" \"$_rl\" >&2; exit 1 ;; esac; "+

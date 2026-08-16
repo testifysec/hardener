@@ -10,7 +10,7 @@ import (
 
 // The %post overlap program (shell-level, after Go unescaping). Kept in sync
 // with rpm.go by the Contains assertion below.
-const overlapAwkProg = `$1 ~ /^\// { p=$1; if (length(p)>=6 && substr(p,length(p)-5)=="(/.*)?") p=substr(p,1,length(p)-6); while (length(p)>1 && substr(p,length(p),1)=="/") p=substr(p,1,length(p)-1); if (p=="") next; rp=r"/"; pp=p"/"; if (p==r || index(rp,pp)==1 || index(pp,rp)==1) { print p; exit } }`
+const overlapAwkProg = `$1 ~ /^\// { p=$1; m=match(p, /[].^$*+?(){}|[\\]/); if (m>0) p=substr(p,1,m-1); while (length(p)>1 && substr(p,length(p),1)=="/") p=substr(p,1,length(p)-1); if (p=="") next; rp=r"/"; pp=p"/"; if (p==r || index(rp,pp)==1 || index(pp,rp)==1) { print p; exit } }`
 
 // The %post local-fcontext overlap guard must reject a rule that EQUALS, is an
 // ANCESTOR of, or is a DESCENDANT of a declared root — not descendants only.
@@ -35,6 +35,8 @@ func TestPostOverlapAwkDetectsAllThreeDirections(t *testing.T) {
 		{"exact-with-regex", "/var/lib/widget(/.*)?    system_u:object_r:some_t:s0", true},
 		{"exact-bare", "/var/lib/widget    system_u:object_r:some_t:s0", true},
 		{"ancestor", "/var/lib(/.*)?    system_u:object_r:some_t:s0", true},
+		{"ancestor-plus-regex", "/var/lib(/.+)?    system_u:object_r:some_t:s0", true}, // round-67: non-(/.*)? ancestor regex must not bypass
+		{"ancestor-dotstar", "/var/lib/.*    system_u:object_r:some_t:s0", true},
 		{"descendant", "/var/lib/widget/sub(/.*)?    system_u:object_r:some_t:s0", true},
 		{"sibling-no-overlap", "/var/lib/other(/.*)?    system_u:object_r:some_t:s0", false},
 		{"unrelated", "/etc/foo(/.*)?    system_u:object_r:some_t:s0", false},

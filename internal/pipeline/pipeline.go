@@ -137,9 +137,13 @@ func Run(r vm.Runner, t *target.Target, opts Options) *Result {
 	// idempotent; runs on every unsuccessful return via fail().
 	moduleInstalled := false
 	cleanupVerifierState := func() {
-		if !moduleInstalled {
-			return
-		}
+		// STOP THE UNIT ON EVERY POST-INSTALL FAILURE, whether or not our module
+		// loaded. install/setup can START the service and then fail BEFORE
+		// moduleInstalled is armed; gating quiescence on module cleanup left that
+		// service active — and, with no module of ours loaded, UNCONFINED — on the
+		// persistent verifier (review finding). So quiescence runs first,
+		// unconditionally; only the SELinux-state teardown below is module-gated.
+		//
 		// NEVER tear down confinement around a LIVE process. Cleanup removes the
 		// permissive entry, ports, module, and labels; doing that while the
 		// confined service is still running would leave a live process UNCONFINED
@@ -168,10 +172,19 @@ func Run(r vm.Runner, t *target.Target, opts Options) *Result {
 				_, _ = r.Run(fmt.Sprintf("sudo systemctl kill -s SIGKILL %s 2>/dev/null; true", t.Unit))
 				_, _ = r.Run(fmt.Sprintf("sudo systemctl stop %s 2>/dev/null; true", t.Unit))
 				if !quiescent() {
-					opts.Log("[%s] WARNING: unit %s is still running after SIGKILL — PRESERVING the SELinux module/ports so the live process stays confined; manual cleanup required", t.Name, t.Unit)
+					if moduleInstalled {
+						opts.Log("[%s] WARNING: unit %s is still running after SIGKILL — PRESERVING the SELinux module/ports so the live process stays confined; manual cleanup required", t.Name, t.Unit)
+					} else {
+						opts.Log("[%s] WARNING: unit %s is still running after SIGKILL and NO hardener module is loaded — the process is UNCONFINED on the verifier; manual cleanup required", t.Name, t.Unit)
+					}
 					return
 				}
 			}
+		}
+		// From here on we tear down SELinux state we created. Nothing to do if our
+		// module never loaded (the unit, if any, is already proven quiescent above).
+		if !moduleInstalled {
+			return
 		}
 		appName := policy.SafeName(p.Name)
 		pt := policy.PortType(p.Name)
@@ -1106,7 +1119,7 @@ sudo semodule -i %s.pp
 			if len(f) == 0 || !strings.HasPrefix(f[0], "/") {
 				continue
 			}
-			lroot := fcRoot(f[0])
+			lroot := fcLiteralStem(f[0])
 			for _, pa := range p.Paths {
 				our := fcRoot(pa.Path)
 				if our == "" || lroot == "" {
@@ -1725,12 +1738,32 @@ func RelabelRoots(p *profile.Profile) []string {
 	return roots
 }
 
-// fcRoot strips the trailing regex portion of a file-contexts pattern.
+// fcRoot strips the trailing regex portion of one of OUR file-contexts patterns.
+// Our paths are constrained by target.Load to a literal path optionally followed
+// by a single terminal (/.*)?, so a fixed-suffix strip yields the literal root
+// while preserving literal dots in a filename (e.g. /etc/foo.conf stays intact).
 func fcRoot(pattern string) string {
 	for _, suffix := range []string{"(/.*)?", "/.*", "(.*)?", ".*"} {
 		pattern = strings.TrimSuffix(pattern, suffix)
 	}
 	return pattern
+}
+
+// fcLiteralStem reduces an EXTERNAL file-contexts regex (a row from `semanage
+// fcontext -C -l`) to its literal prefix: the substring before the first regex
+// metacharacter, trailing slashes stripped. Unlike our own constrained paths, a
+// local rule can be any ERE, so an ancestor like /var/lib(/.+)? — which the
+// fixed-suffix fcRoot leaves intact and thus fails to match — must be compared as
+// the directory /var/lib. Over-truncation (a literal '.' in an external rule read
+// as a metacharacter) is deliberately conservative and fails closed (review
+// finding — round 67; matches the %post overlap awk's literal-stem reduction).
+func fcLiteralStem(pattern string) string {
+	for i, r := range pattern {
+		if strings.ContainsRune(`.^$*+?()[]{}|\`, r) {
+			return strings.TrimRight(pattern[:i], "/")
+		}
+	}
+	return strings.TrimRight(pattern, "/")
 }
 
 // staticChecks runs sesearch least-privilege assertions against the loaded policy.
