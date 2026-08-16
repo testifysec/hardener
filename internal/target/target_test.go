@@ -294,3 +294,20 @@ paths:
 		t.Error("a generic-component tie (system → system-widget) must be rejected without owned: true")
 	}
 }
+
+// Round 37: an EXACT match on a generic component must not confer ownership —
+// an app named `services` must not claim /etc/services without owned: true.
+func TestLoadRejectsExactGenericComponent(t *testing.T) {
+	m := `name: services
+install: "true"
+unit: services.service
+exercise: "true"
+executables:
+  - /opt/services/bin/svc
+paths:
+  - { path: "/etc/services(/.*)?", kind: conf }
+`
+	if _, err := Load(write(t, m)); err == nil {
+		t.Error("an app named after a generic component must not claim it without owned: true")
+	}
+}
