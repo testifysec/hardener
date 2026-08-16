@@ -82,6 +82,11 @@ var broadSystemRoots = map[string]bool{
 var sharedSystemdTrees = []string{
 	"/etc/systemd/system", "/etc/systemd/user",
 	"/usr/lib/systemd/system", "/usr/lib/systemd/user",
+	// /usr/local/lib/systemd is the local-admin tier of systemd's unit load
+	// path (higher priority than /usr/lib); packages and admins drop units
+	// here, so it is as shared as /usr/lib and must not be claimable either
+	// (review finding).
+	"/usr/local/lib/systemd/system", "/usr/local/lib/systemd/user",
 	"/lib/systemd/system", "/lib/systemd/user",
 	"/run/systemd/system", "/run/systemd/user",
 	// On RHEL /var/run is a symlink to /run, so a claim spelled with /var/run

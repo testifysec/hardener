@@ -3,6 +3,7 @@ package avc
 
 import (
 	"errors"
+	"path"
 	"regexp"
 	"sort"
 	"strconv"
@@ -46,10 +47,25 @@ func ParseLogWithPaths(log string) []Denial {
 	byInode := map[string]map[string]string{}
 	loneName := map[string]string{}
 	loneCount := map[string]int{}
+	// event id → working directory from the sibling type=CWD record. A PATH
+	// record's name= is relative to this when the syscall used a relative path
+	// (e.g. name="state.db" with cwd="/var/lib/widget"). Taking name verbatim
+	// then leaves a bare basename that matches no absolute file-context pattern,
+	// so a mislabeled file is misread as a genuine missing permission and
+	// over-granted as a type-wide allow rule instead of a relabel (review finding).
+	cwdByEvent := map[string]string{}
 	for _, line := range strings.Split(log, "\n") {
 		ev := ""
 		if m := eventRe.FindStringSubmatch(line); m != nil {
 			ev = m[1]
+		}
+		if strings.Contains(line, "type=CWD") && ev != "" {
+			for _, f := range fieldRe.FindAllStringSubmatch(line, -1) {
+				if f[1] == "cwd" {
+					cwdByEvent[ev] = strings.Trim(f[2], `"`)
+				}
+			}
+			continue
 		}
 		if strings.Contains(line, "type=PATH") && ev != "" {
 			var name, inode string
@@ -78,6 +94,19 @@ func ParseLogWithPaths(log string) []Denial {
 			ds = append(ds, indexed{*d, ev})
 		}
 	}
+	// resolve turns a PATH-record name into an absolute path: an absolute name is
+	// taken as-is; a relative name is joined to the event's CWD and cleaned. A
+	// relative name with no CWD record is left unchanged — no worse than before,
+	// and we refuse to invent a root we did not observe.
+	resolve := func(ev, name string) string {
+		if name == "" || strings.HasPrefix(name, "/") {
+			return name
+		}
+		if cwd := cwdByEvent[ev]; cwd != "" {
+			return path.Clean(cwd + "/" + name)
+		}
+		return name
+	}
 	out := make([]Denial, 0, len(ds))
 	for _, x := range ds {
 		if x.d.Path == "" && x.event != "" {
@@ -85,11 +114,11 @@ func ParseLogWithPaths(log string) []Denial {
 			// only when the event has exactly one. Never guess among several.
 			if x.d.Ino != "" && byInode[x.event] != nil {
 				if name, ok := byInode[x.event][x.d.Ino]; ok {
-					x.d.Path = name
+					x.d.Path = resolve(x.event, name)
 				}
 			}
 			if x.d.Path == "" && loneCount[x.event] == 1 {
-				x.d.Path = loneName[x.event]
+				x.d.Path = resolve(x.event, loneName[x.event])
 			}
 		}
 		out = append(out, x.d)
