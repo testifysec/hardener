@@ -111,7 +111,7 @@ func TestLoadRejectsBroadPaths(t *testing.T) {
 			t.Errorf("broad path %q must be rejected", bad)
 		}
 	}
-	for _, ok := range []string{"/etc/widget(/.*)?", "/var/lib/widget(/.*)?", "/opt/widget(/.*)?", "/usr/lib/widgetsrv(/.*)?"} {
+	for _, ok := range []string{"/etc/widget(/.*)?", "/var/lib/widget(/.*)?", "/opt/widget(/.*)?", "/usr/lib/widget(/.*)?"} {
 		if _, err := Load(write(t, fmt.Sprintf(broadPathManifest, ok))); err != nil {
 			t.Errorf("bounded path %q must load: %v", ok, err)
 		}
@@ -159,21 +159,53 @@ func TestLoadRejectsUnownedAndInjectionPaths(t *testing.T) {
 		"/var/lib/other(/.*)?",                    // app-specific shape but ties to "other"
 		"/etc/widget\n/etc/shadow gen_context(x)", // newline injection
 		"/etc/widget\x00evil",                     // NUL byte
+		// Round 25: a non-boundary prefix is NOT ownership — "widgetsrv" and
+		// "widgetd" merely start with "widget" (same shape as dock→docker), so
+		// they must be rejected unless explicitly vouched for with owned: true.
+		"/usr/lib/widgetsrv(/.*)?",
+		"/opt/widgetd/data(/.*)?",
 	}
 	for _, p := range bad {
 		if _, err := Load(write(t, fmt.Sprintf(pathManifest, p))); err == nil {
 			t.Errorf("path %q must be rejected", p)
 		}
 	}
-	// App-owned, bounded paths still load — including a vendor dir whose name
-	// merely shares a prefix with the app (splunkforwarder for a splunk app).
+	// App-owned paths tie to the app at a TOKEN BOUNDARY: exact match, or one is
+	// the other plus an underscore-delimited token (widget ↔ widget_data).
 	for _, ok := range []string{
 		"/etc/widget(/.*)?",
 		"/var/lib/widget(/.*)?",
-		"/opt/widgetd/data(/.*)?",
+		"/opt/widget_data(/.*)?",
 	} {
 		if _, err := Load(write(t, fmt.Sprintf(pathManifest, ok))); err != nil {
 			t.Errorf("app-owned path %q must load: %v", ok, err)
 		}
+	}
+}
+
+// Round 25: a non-boundary vendor directory (plexmediaserver for plex) cannot
+// be confirmed by the name heuristic, so it must carry an explicit owned: true
+// to be accepted — turning a silent heuristic pass into a reviewable claim. The
+// override does NOT relax the broad-system-root guard.
+func TestLoadOwnedOverrideForVendorDirs(t *testing.T) {
+	const ownedManifest = `name: widget
+install: "true"
+unit: widget.service
+exercise: "true"
+executables:
+  - /opt/widget/bin/widgetd
+paths:
+  - { path: %q, kind: content, owned: %v }
+`
+	// Non-boundary vendor dir: rejected without owned, accepted with it.
+	if _, err := Load(write(t, fmt.Sprintf(ownedManifest, "/usr/lib/widgetmediaserver(/.*)?", false))); err == nil {
+		t.Error("non-boundary vendor dir must be rejected without owned: true")
+	}
+	if _, err := Load(write(t, fmt.Sprintf(ownedManifest, "/usr/lib/widgetmediaserver(/.*)?", true))); err != nil {
+		t.Errorf("owned: true must accept a vendor dir: %v", err)
+	}
+	// owned: true must NOT let a broad system root through.
+	if _, err := Load(write(t, fmt.Sprintf(ownedManifest, "/usr(/.*)?", true))); err == nil {
+		t.Error("owned: true must not override the broad-system-root guard")
 	}
 }

@@ -26,8 +26,10 @@ executables:
   - "/usr/lib/plexmediaserver/Plex Media Scanner"
   - "/usr/lib/plexmediaserver/Plex Tuner Service"
 paths:
-  - { path: "/usr/lib/plexmediaserver(/.*)?", kind: content }
-  - { path: "/var/lib/plexmediaserver(/.*)?", kind: var_lib }
+  # plexmediaserver is Plex's vendor directory; its name shares only a
+  # non-boundary prefix with "plex", so ownership is asserted explicitly.
+  - { path: "/usr/lib/plexmediaserver(/.*)?", kind: content, owned: true }
+  - { path: "/var/lib/plexmediaserver(/.*)?", kind: var_lib, owned: true }
 ports:
   - { proto: tcp, port: 32400 }
 exercise: |

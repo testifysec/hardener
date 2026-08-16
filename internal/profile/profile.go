@@ -6,6 +6,12 @@ package profile
 type PathAccess struct {
 	Path string `yaml:"path"` // file_contexts-style regex, e.g. /var/lib/widget(/.*)?
 	Kind string `yaml:"kind"` // conf | var_lib | log | runtime | content | tmp | cache
+	// Owned is an explicit operator assertion that this app owns Path even
+	// though its directory name does not match the app name at a token boundary
+	// (e.g. plex owning /usr/lib/plexmediaserver). It is required — and only
+	// honored — when the name heuristic cannot confirm ownership, turning a
+	// silent heuristic pass into a reviewable, greppable claim (review finding).
+	Owned bool `yaml:"owned,omitempty"`
 }
 
 // Port is a listening socket the application needs to bind.

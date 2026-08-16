@@ -38,6 +38,13 @@ func (s *SSH) sshArgs() []string {
 }
 
 func (s *SSH) Run(script string) (string, error) {
+	// A Target beginning with '-' is parsed by ssh as an option, so a value like
+	// "-oProxyCommand=<cmd>" would execute a local command instead of connecting
+	// (review finding). ssh's own `--` handling is version-dependent, so reject
+	// option-like targets outright — a real user@host never starts with '-'.
+	if s.Target == "" || strings.HasPrefix(s.Target, "-") {
+		return "", fmt.Errorf("invalid ssh target %q: must be user@host, not an option", s.Target)
+	}
 	timeout := s.Timeout
 	if timeout == 0 {
 		timeout = 10 * time.Minute

@@ -92,7 +92,13 @@ func ExtractObserved(p *profile.Profile, rules []policy.AllowRule) Observed {
 			// it still faces the declaration comparison.
 			for _, perm := range r.Perms {
 				if perm == "name_bind" {
-					bindSet[r.Target] = true
+					// Key the bind by type:class so a tcp_socket bind and a
+					// udp_socket bind on the SAME *_port_t are distinct entries.
+					// Keying by type alone let an added UDP bind collapse into an
+					// existing TCP one, so first-party drift and second-party
+					// undeclared behavior passed on identical baselines (review
+					// finding).
+					bindSet[r.Target+":"+r.Class] = true
 				} else {
 					foreignSet[foreignKey(r.Target, r.Class, perm)] = true
 				}
