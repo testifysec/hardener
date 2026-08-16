@@ -23,14 +23,23 @@ func TestWriteFileScriptResistsDelimiterInjection(t *testing.T) {
 	}
 }
 
-// Paths with shell metacharacters must be single-quoted safely.
+// Paths with shell metacharacters must be single-quoted safely. Route the
+// metacharacter path THROUGH writeFileScript and assert its ShellQuote'd form
+// appears — testing ShellQuote in isolation and then calling writeFileScript with
+// a safe path would still pass if writeFileScript stopped quoting the path at all
+// (review finding — round 65).
 func TestWriteFileScriptQuotesPath(t *testing.T) {
-	if got, want := ShellQuote(`it's a $path`), `'it'\''s a $path'`; got != want {
-		t.Errorf("ShellQuote = %q, want %q", got, want)
+	evilPath := `/etc/app/it's $(touch pwn)`
+	script := writeFileScript(evilPath, "x")
+	// The fully escaped form must be present verbatim...
+	if want := ShellQuote(evilPath); !strings.Contains(script, want) {
+		t.Errorf("writeFileScript did not route the path through ShellQuote; want %q in:\n%s", want, script)
 	}
-	script := writeFileScript("/etc/app/x", "x")
-	if !strings.Contains(script, `'/etc/app/x'`) {
-		t.Errorf("path not single-quoted:\n%s", script)
+	// ...and the raw, unescaped sequence must NOT appear: ShellQuote breaks the
+	// apostrophe with '\'' , so a correctly-quoted script never contains the bare
+	// `it's $(touch pwn)` run. Its presence means the path went in unquoted.
+	if strings.Contains(script, `it's $(touch pwn)`) {
+		t.Errorf("raw unescaped path leaked into the sudo'd script:\n%s", script)
 	}
 }
 

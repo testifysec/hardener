@@ -18,12 +18,12 @@ func TestExactExecutableMatcherWins(t *testing.T) {
 		Paths:       []profile.PathAccess{{Path: "/usr/lib/plexmediaserver(/.*)?", Kind: "content"}},
 	}
 	ms := compileFCMatchers(p)
-	got, ok := expectedType(ms, "/usr/lib/plexmediaserver/Plex Media Server")
+	got, ok := expectedType(ms, "/usr/lib/plexmediaserver/Plex Media Server", "file")
 	if !ok || got != "plex_exec_t" {
 		t.Errorf("executable must resolve to plex_exec_t, got %q (ok=%v)", got, ok)
 	}
 	// A non-executable file under the same tree still resolves to content.
-	if g, _ := expectedType(ms, "/usr/lib/plexmediaserver/Resources/lib.so"); g != "plex_content_t" {
+	if g, _ := expectedType(ms, "/usr/lib/plexmediaserver/Resources/lib.so", "file"); g != "plex_content_t" {
 		t.Errorf("content file should resolve to plex_content_t, got %q", g)
 	}
 

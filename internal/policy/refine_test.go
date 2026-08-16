@@ -326,14 +326,46 @@ func TestFCMatcherPrefersMostSpecific(t *testing.T) {
 		},
 	}
 	ms := compileFCMatchers(p)
-	if got, ok := expectedType(ms, "/var/lib/widget/plugins/x.so"); !ok || got != "widget_content_t" {
+	if got, ok := expectedType(ms, "/var/lib/widget/plugins/x.so", "file"); !ok || got != "widget_content_t" {
 		t.Errorf("nested path must resolve to the most-specific type widget_content_t, got %q (ok=%v)", got, ok)
 	}
-	if got, ok := expectedType(ms, "/var/lib/widget/state.db"); !ok || got != "widget_var_lib_t" {
+	if got, ok := expectedType(ms, "/var/lib/widget/state.db", "file"); !ok || got != "widget_var_lib_t" {
 		t.Errorf("a file only under the broad path must resolve to widget_var_lib_t, got %q", got)
 	}
 	// The exact executable still wins over any tree claim covering it.
-	if got, ok := expectedType(ms, "/opt/widget/bin/widgetd"); !ok || got != "widget_exec_t" {
+	if got, ok := expectedType(ms, "/opt/widget/bin/widgetd", "file"); !ok || got != "widget_exec_t" {
 		t.Errorf("exact executable must resolve to widget_exec_t, got %q", got)
+	}
+}
+
+// An executable file-context maps with the SELinux `--` selector (regular files
+// only). A symlink or directory sharing that exact path is NOT labeled _exec_t;
+// a less-specific unselected claim covering the tree applies instead. expectedType
+// must honor the selector by class, or a correctly-labeled symlink/dir under an
+// executable path is misread as relabel drift toward _exec_t — suppressing the
+// symlink's real denial and blocking refinement convergence. (review finding — round 65)
+func TestFCMatcherHonorsExecSelectorByClass(t *testing.T) {
+	p := &profile.Profile{
+		Name:        "widget",
+		Executables: []string{"/opt/widget/bin/widgetd"},
+		Paths: []profile.PathAccess{
+			// A content claim OVERLAPS the executable path (the exec lives under it).
+			{Path: "/opt/widget(/.*)?", Kind: "content"},
+		},
+	}
+	ms := compileFCMatchers(p)
+	// A REGULAR FILE at the exec path is the executable: _exec_t (selector applies).
+	if got, ok := expectedType(ms, "/opt/widget/bin/widgetd", "file"); !ok || got != "widget_exec_t" {
+		t.Errorf("regular file at exec path must resolve to widget_exec_t, got %q (ok=%v)", got, ok)
+	}
+	// A SYMLINK at the same path is NOT _exec_t — the `--` selector excludes it, so
+	// the overlapping content claim applies. Reporting _exec_t here would be a false
+	// relabel that discards the symlink's genuine denial.
+	if got, ok := expectedType(ms, "/opt/widget/bin/widgetd", "lnk_file"); !ok || got != "widget_content_t" {
+		t.Errorf("symlink at exec path must fall through to widget_content_t, got %q (ok=%v)", got, ok)
+	}
+	// A DIRECTORY at the same path likewise falls through to the content claim.
+	if got, ok := expectedType(ms, "/opt/widget/bin/widgetd", "dir"); !ok || got != "widget_content_t" {
+		t.Errorf("directory at exec path must fall through to widget_content_t, got %q (ok=%v)", got, ok)
 	}
 }

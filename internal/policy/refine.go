@@ -204,7 +204,7 @@ func Refine(p *profile.Profile, denials []avc.Denial) Refinement {
 	var remaining []avc.Denial
 	for _, d := range denials {
 		if d.SourceType == dom && isFileClass(d.Class) {
-			if exp, ok := expectedType(matchersEarly, d.Path); ok && exp != d.TargetType {
+			if exp, ok := expectedType(matchersEarly, d.Path, d.Class); ok && exp != d.TargetType {
 				res.Relabels = append(res.Relabels, Relabel{
 					Path: d.Path, ObservedType: d.TargetType, ExpectedType: exp,
 				})
@@ -433,6 +433,15 @@ type fcMatcher struct {
 	re   *regexp.Regexp
 	typ  string
 	spec int // SELinux-style specificity; higher wins (most-specific match)
+	// fileOnly mirrors the SELinux `--` file-context selector: an executable
+	// mapping is emitted as `<path>\t--\t...`, so it labels REGULAR FILES only.
+	// A symlink (lnk_file) or directory (dir) at that same path is NOT given the
+	// exec type — a less-specific unselected claim (or the base label) applies.
+	// Without this, a correctly-labeled symlink/dir under an executable path was
+	// misread as relabel drift toward _exec_t, suppressing its real denial and
+	// blocking convergence (review finding). Path claims emit NO selector, so
+	// they match every class (fileOnly=false).
+	fileOnly bool
 }
 
 // fcSpecificity scores a file-context expression the way SELinux resolves
@@ -463,14 +472,14 @@ func compileFCMatchers(p *profile.Profile) []fcMatcher {
 		if err != nil {
 			continue
 		}
-		ms = append(ms, fcMatcher{re, TypeForKind(p.Name, KindExec), fcSpecificity(exe)})
+		ms = append(ms, fcMatcher{re, TypeForKind(p.Name, KindExec), fcSpecificity(exe), true})
 	}
 	for _, pa := range p.Paths {
 		re, err := regexp.Compile("^" + pa.Path + "$")
 		if err != nil {
 			continue
 		}
-		ms = append(ms, fcMatcher{re, TypeForKind(p.Name, KindFromString(pa.Kind)), fcSpecificity(pa.Path)})
+		ms = append(ms, fcMatcher{re, TypeForKind(p.Name, KindFromString(pa.Kind)), fcSpecificity(pa.Path), false})
 	}
 	// Order by SELinux precedence, MOST-SPECIFIC first. expectedType returns the
 	// first match, but SELinux labels a file by the most-specific file_contexts
@@ -540,11 +549,21 @@ func isCapabilityClass(c string) bool {
 	return false
 }
 
-func expectedType(ms []fcMatcher, path string) (string, bool) {
+// expectedType returns the SELinux type the most-specific matching file-context
+// entry would assign to path for an object of the given class. A fileOnly (`--`)
+// matcher is skipped unless the object is a regular file, mirroring SELinux: a
+// symlink or directory at an executable path is NOT labeled _exec_t, so it must
+// fall through to a less-specific unselected claim rather than be misread as
+// relabel drift (review finding). Pass class "file" to resolve the regular-file
+// label (the common case).
+func expectedType(ms []fcMatcher, path, class string) (string, bool) {
 	if path == "" {
 		return "", false
 	}
 	for _, m := range ms {
+		if m.fileOnly && class != "file" {
+			continue
+		}
 		if m.re.MatchString(path) {
 			return m.typ, true
 		}
