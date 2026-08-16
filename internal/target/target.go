@@ -101,12 +101,16 @@ var sharedSystemdTrees = []string{
 	"/var/run/systemd/system", "/var/run/systemd/user",
 }
 
-// isSharedSystemdTree reports whether root is, or is under, a shared systemd unit
-// directory.
+// isSharedSystemdTree reports whether root is, is UNDER, or is an ANCESTOR of a
+// shared systemd unit directory. The ancestor case matters as much as the other
+// two: a claim like /run/systemd(/.*)? or /usr/local/lib/systemd(/.*)? sits
+// ABOVE a protected tree (/run/systemd/system, ...), so restorecon -RF on it
+// would recursively relabel every shared unit beneath — the equal/descendant
+// checks alone missed that (review finding).
 func isSharedSystemdTree(root string) bool {
 	root = strings.TrimRight(root, "/")
 	for _, t := range sharedSystemdTrees {
-		if root == t || strings.HasPrefix(root, t+"/") {
+		if root == t || strings.HasPrefix(root, t+"/") || strings.HasPrefix(t+"/", root+"/") {
 			return true
 		}
 	}

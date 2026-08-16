@@ -439,3 +439,46 @@ paths:
 		}
 	}
 }
+
+// A claim ABOVE a protected systemd tree (a parent that CONTAINS it) is as
+// dangerous as claiming the tree itself: restorecon -RF on the parent relabels
+// every shared unit beneath. isSharedSystemdTree must reject ancestors too, not
+// only the tree and its descendants. (review finding — round 52)
+func TestLoadRejectsSystemdParentTrees(t *testing.T) {
+	const m = `name: widget
+install: "true"
+unit: widget.service
+exercise: "true"
+executables:
+  - /opt/widget/bin/widgetd
+paths:
+  - { path: %q, kind: conf, owned: true }
+`
+	for _, p := range []string{
+		"/run/systemd(/.*)?",
+		"/lib/systemd(/.*)?",
+		"/usr/local/lib/systemd(/.*)?",
+		"/var/run/systemd(/.*)?",
+	} {
+		if _, err := Load(write(t, fmt.Sprintf(m, p))); err == nil {
+			t.Errorf("%s (parent of a protected unit tree) must be rejected even with owned: true", p)
+		}
+	}
+}
+
+// Guard against over-rejection: a bounded app dir under /run that merely shares
+// the /run prefix with a protected tree must still be allowed.
+func TestLoadAllowsBoundedRunAppDir(t *testing.T) {
+	const m = `name: widget
+install: "true"
+unit: widget.service
+exercise: "true"
+executables:
+  - /opt/widget/bin/widgetd
+paths:
+  - { path: "/run/widget(/.*)?", kind: runtime }
+`
+	if _, err := Load(write(t, m)); err != nil {
+		t.Errorf("/run/widget is a legitimate bounded runtime dir, must load: %v", err)
+	}
+}
