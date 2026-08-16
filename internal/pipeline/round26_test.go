@@ -453,3 +453,18 @@ func TestRunCleansVerifierStateOnEnforceFailure(t *testing.T) {
 		t.Error("an enforcement failure must roll back the generated module (semodule -r)")
 	}
 }
+
+// Round 40: `semanage port -d` does not accept -t; every generated deletion must
+// use `-d -p PROTO PORT` (the -t form errored and left mappings behind, blocking
+// semodule -r).
+func TestSpecPortDeleteUsesValidSyntax(t *testing.T) {
+	p := testTarget().Profile()
+	p.Ports = []profile.Port{{Proto: "tcp", Port: 8443}}
+	spec := GenerateSpec(p, "1")
+	if strings.Contains(spec, "semanage port -d -t") {
+		t.Errorf("spec uses invalid `semanage port -d -t` (delete rejects -t):\n%s", spec)
+	}
+	if !strings.Contains(spec, "semanage port -d -p") {
+		t.Errorf("spec must delete ports with `semanage port -d -p`:\n%s", spec)
+	}
+}

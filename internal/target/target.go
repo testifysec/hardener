@@ -75,10 +75,33 @@ var broadSystemRoots = map[string]bool{
 	"/var/tmp": true, "/etc/systemd": true, "/usr/lib/systemd": true,
 }
 
+// sharedSystemdTrees are the unit directories that hold EVERY service's unit
+// files. No manifest may claim them or anything under them — a recursive relabel
+// would rewrite all units on the host — and the exact-match broadSystemRoots
+// denylist could not enumerate every depth (review finding). Checked by prefix.
+var sharedSystemdTrees = []string{
+	"/etc/systemd/system", "/etc/systemd/user",
+	"/usr/lib/systemd/system", "/usr/lib/systemd/user",
+	"/lib/systemd/system", "/lib/systemd/user",
+	"/run/systemd/system", "/run/systemd/user",
+}
+
+// isSharedSystemdTree reports whether root is, or is under, a shared systemd unit
+// directory.
+func isSharedSystemdTree(root string) bool {
+	root = strings.TrimRight(root, "/")
+	for _, t := range sharedSystemdTrees {
+		if root == t || strings.HasPrefix(root, t+"/") {
+			return true
+		}
+	}
+	return false
+}
+
 // isBroadSystemRoot reports whether root is a shared system tree (or "/").
 func isBroadSystemRoot(root string) bool {
 	root = strings.TrimRight(root, "/")
-	return root == "" || broadSystemRoots[root]
+	return root == "" || broadSystemRoots[root] || isSharedSystemdTree(root)
 }
 
 // genericPathComponents are directory names too generic to prove app ownership

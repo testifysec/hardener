@@ -311,3 +311,27 @@ paths:
 		t.Error("an app named after a generic component must not claim it without owned: true")
 	}
 }
+
+// Round 40: shared systemd unit trees must be rejected even WITH owned: true —
+// relabeling them rewrites every service's unit files.
+func TestLoadRejectsSystemdUnitTreesEvenWhenOwned(t *testing.T) {
+	const m = `name: widget
+install: "true"
+unit: widget.service
+exercise: "true"
+executables:
+  - /opt/widget/bin/widgetd
+paths:
+  - { path: %q, kind: conf, owned: true }
+`
+	for _, p := range []string{
+		"/etc/systemd/system(/.*)?",
+		"/usr/lib/systemd/system(/.*)?",
+		"/etc/systemd/system/multi-user.target.wants(/.*)?",
+		"/run/systemd/system(/.*)?",
+	} {
+		if _, err := Load(write(t, fmt.Sprintf(m, p))); err == nil {
+			t.Errorf("systemd unit tree %q must be rejected even with owned: true", p)
+		}
+	}
+}
