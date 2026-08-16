@@ -339,13 +339,25 @@ _rollback() {
     # exists), never a pre-existing mapping owned by another service.
     for _row in $_added; do _rp=${_row%%%%:*}; _rn=${_row##*:}; semanage port -d -p "$_rp" "$_rn" 2>/dev/null || :; done
     if [ "$_op" = 1 ]; then
-        # Fresh install: remove the module, then restore base file labels.
+        # Fresh install: remove the REJECTED module, then restore base file labels.
+        # VERIFY removal — suppressing the error let a partially-loaded rejected
+        # module stay active, confining the app under UNVERIFIED policy (review
+        # finding). If it is still present, say so loudly with the manual fix.
         semodule -r %[1]s 2>/dev/null || :
+        if semodule -l 2>/dev/null | grep -qE "^%[1]s([[:space:]]|$)"; then
+            echo "CRITICAL: the rejected %[1]s policy module is still loaded after rollback; the application may be confined by UNVERIFIED policy. Remove it manually: sudo semodule -r %[1]s" >&2
+        fi
 %[6]s
     elif [ -n "$_snap" ]; then
-        # Upgrade failure: reinstall the previous module and re-apply its labels —
-        # the prior working policy is back in place (review finding).
+        # Upgrade failure: reinstall the PREVIOUS module and re-apply its labels so
+        # the prior working policy is back in place (review finding). VERIFY it
+        # reloaded — suppressing the error left the app with the rejected new module
+        # or NO module, i.e. running under unverified/absent policy while RPM only
+        # reported failure (review finding).
         ( cd "$_snap" && { semodule -i %[1]s.cil || semodule -i %[1]s.pp; } ) 2>/dev/null || :
+        if ! semodule -l 2>/dev/null | grep -qE "^%[1]s([[:space:]]|$)"; then
+            echo "CRITICAL: could not restore the previous %[1]s policy module during rollback; the application has NO verified policy active. Restore it from the prior package immediately." >&2
+        fi
 %[6]s
         # Re-apply the PREVIOUS module's labels on ALL of its roots — including
         # any removed root already reset to base before the failure — so the

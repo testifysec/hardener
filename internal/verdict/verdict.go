@@ -370,6 +370,14 @@ func failureOf(res *pipeline.Result) string {
 		return "enforcing verification failed"
 	case len(res.Flags) > 0 && !res.FlagsAccepted:
 		return fmt.Sprintf("%d review-flagged rules were not accepted (--accept-flagged records the review decision)", len(res.Flags))
+	case len(res.Collisions) > 0 && !res.FlagsAccepted:
+		// A base-policy collision REMOVES the colliding path from the generated
+		// file contexts (GenerateFCExcluding), so part of the requested confinement
+		// is silently absent. Unlike a flagged rule, this reached a passing
+		// verdict with no explicit acceptance (review finding). Treat it like a
+		// flag: fail closed unless the operator consciously accepts the reduced
+		// confinement (--accept-flagged), which still discloses it in the verdict.
+		return fmt.Sprintf("%d base-policy collision(s) removed declared confinement and were not accepted (--accept-flagged records the review decision)", len(res.Collisions))
 	}
 	for _, c := range res.StaticChecks {
 		if !c.Passed {

@@ -163,3 +163,25 @@ func TestGenericTargetTypesAreFlagged(t *testing.T) {
 		}
 	}
 }
+
+// SELinux permits identical regexes with different SELECTORS (-- file, -d dir).
+// Keying collision detection on the regex alone overwrote one with the other,
+// so a real collision could be missed or a false one reported depending on
+// record order. Our exec claim uses `--`; it must collide only with overlapping
+// selectors. (review finding — round 59)
+func TestFindCollisionsRespectsSelector(t *testing.T) {
+	p := &profile.Profile{Name: "widget", Executables: []string{"/opt/widget/bin/widgetd"}}
+	// Same regex, two selectors; the -d entry is listed FIRST so the old
+	// regex-only keying would have kept the wrong record.
+	base := "/opt/widget/bin/widgetd\t-d\tsystem_u:object_r:some_dir_t:s0\n" +
+		"/opt/widget/bin/widgetd\t--\tsystem_u:object_r:bin_t:s0\n"
+	cols := FindCollisions(p, base)
+	if len(cols) != 1 || cols[0].BaseType != "bin_t" {
+		t.Fatalf("a `--` exec claim must collide with the `--` base entry (bin_t), got %+v", cols)
+	}
+	// A base entry with ONLY the -d selector shares the regex but not the file
+	// type, so it must NOT collide with our `--` exec claim (no false positive).
+	if c := FindCollisions(p, "/opt/widget/bin/widgetd\t-d\tsystem_u:object_r:some_dir_t:s0\n"); len(c) != 0 {
+		t.Errorf("a -d-only base entry must not collide with a -- exec claim, got %+v", c)
+	}
+}

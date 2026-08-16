@@ -125,15 +125,27 @@ func TestJSONWireFormat(t *testing.T) {
 	}
 }
 
-// A recovered base-policy collision (non-entrypoint: the pipeline drops the
-// path and the app runs less-confined there) must surface in the verdict STATUS
-// as pass-with-exceptions, not sit silently in the predicate body under a clean
-// "pass". Entrypoint collisions fail earlier, so any collision reaching the
-// verdict is a recovered one — disclosed, not fatal. (review finding — round 50)
-func TestCollisionsYieldPassWithExceptions(t *testing.T) {
+// A base-policy collision REMOVES the colliding path from the generated file
+// contexts, so part of the requested confinement is absent. Like a flagged rule,
+// it must NOT reach a passing verdict without explicit acceptance: unaccepted →
+// fail closed; accepted (--accept-flagged) → pass-with-exceptions, disclosed in
+// the verdict status. (review findings — rounds 50, 59)
+func TestCollisionsRequireAcceptance(t *testing.T) {
+	col := []policy.Collision{{Path: "/var/lib/widget/shared", BaseType: "var_lib_t", WouldBeType: "widget_var_lib_t"}}
+
+	// Unaccepted: fail closed.
 	r := passingResult()
-	r.Collisions = []policy.Collision{{Path: "/var/lib/widget/shared", BaseType: "var_lib_t", WouldBeType: "widget_var_lib_t"}}
+	r.FlagsAccepted = false
+	r.Flags = nil // isolate the collision from the flag gate
+	r.Collisions = col
+	if v := Build(r, Env{}, nil).Predicate.Verdict; v != "fail" {
+		t.Errorf("an unaccepted collision must fail closed, got %q", v)
+	}
+
+	// Accepted: pass-with-exceptions, disclosed in the status.
+	r = passingResult() // passingResult sets FlagsAccepted: true
+	r.Collisions = col
 	if v := Build(r, Env{}, nil).Predicate.Verdict; v != "pass-with-exceptions" {
-		t.Errorf("a recovered collision must disclose in the verdict status, got %q", v)
+		t.Errorf("an accepted collision must disclose as pass-with-exceptions, got %q", v)
 	}
 }
