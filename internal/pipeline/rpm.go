@@ -336,6 +336,24 @@ if [ "$1" -ge 2 ] && [ -f %%{_datadir}/selinux/hardener/%[1]s.roots ]; then
         exit 1
     fi
 fi
+# Upgrade: snapshot the CURRENTLY-INSTALLED module here, in %%pre, so a snapshot
+# failure aborts the transaction BEFORE rpm commits the new payload and NEVRA.
+# Taking it in %%post meant a failed mktemp/semodule -E left the OLD policy active
+# while the new .pp/.fc/.roots were already recorded as installed — and retrying
+# the same NEVRA is a no-op (review finding — round 71). The old package is still
+# installed at %%pre time, so semodule -E extracts exactly the module we may need
+# to restore. Scriptlet variables do not survive into %%post, so the snapshot lives
+# in the package-owned, root-only directory (never /tmp: a predictable temp path is
+# a symlink-redirect target for a local user).
+if [ "$1" -ge 2 ]; then
+    rm -rf %%{_datadir}/selinux/hardener/%[1]s.snap
+    mkdir -p %%{_datadir}/selinux/hardener/%[1]s.snap
+    if ! ( cd %%{_datadir}/selinux/hardener/%[1]s.snap && semodule -E %[1]s ) 2>/dev/null; then
+        rm -rf %%{_datadir}/selinux/hardener/%[1]s.snap
+        echo "ERROR: could not snapshot the current %[1]s module for rollback; refusing a non-atomic upgrade" >&2
+        exit 1
+    fi
+fi
 
 %%post
 # Fail closed WITH transactional rollback. Loading the module then failing
@@ -386,14 +404,15 @@ if [ "$_op" = 1 ]; then
         exit 1
     fi
 else
-    # Upgrade: snapshot the currently-installed module before replacing it. If the
-    # snapshot cannot be taken we ABORT before mutating anything — proceeding would
-    # make a later failure non-atomic (we could not restore the prior module),
-    # leaving an unverified, inconsistent policy active (review finding). This runs
-    # before the trap and any change, so aborting here leaves the prior state intact.
-    _snap="$(mktemp -d 2>/dev/null || true)"
-    if [ -z "$_snap" ] || ! ( cd "$_snap" && semodule -E %[1]s ) 2>/dev/null; then
-        echo "ERROR: could not snapshot the current %[1]s module for rollback; refusing a non-atomic upgrade" >&2
+    # Upgrade: the pre-upgrade module snapshot was taken in %%pre, BEFORE rpm
+    # committed the new payload/NEVRA, so a snapshot failure aborted the whole
+    # transaction cleanly instead of stranding us here with new files on disk and
+    # old policy active (review finding). Verify it arrived and is non-empty —
+    # rollback restores from it, so an absent or empty snapshot means we cannot
+    # roll back and must refuse before mutating anything.
+    _snap=%%{_datadir}/selinux/hardener/%[1]s.snap
+    if [ ! -d "$_snap" ] || [ -z "$(ls -A "$_snap" 2>/dev/null)" ]; then
+        echo "ERROR: the pre-upgrade %[1]s module snapshot is missing or empty; cannot guarantee rollback — refusing a non-atomic upgrade" >&2
         exit 1
     fi
 fi
@@ -488,6 +507,10 @@ if [ "$_op" != 1 ] && [ -f %%{_datadir}/selinux/hardener/%[1]s.oldroots ]; then
 fi
 _ok=1
 rm -f %%{_datadir}/selinux/hardener/%[1]s.oldroots
+# The %%pre snapshot has served its purpose once the upgrade succeeded. Removed
+# only on SUCCESS: the rollback path restores from it, and leaving it after a
+# failure keeps manual recovery possible.
+rm -rf %%{_datadir}/selinux/hardener/%[1]s.snap
 
 %%postun
 if [ $1 -eq 0 ]; then
