@@ -26,7 +26,11 @@ func passingResult() *pipeline.Result {
 		EnforceOK: true, DomainOK: true, ExerciseOK: true, FlagsAccepted: true,
 		EntrypointDigests: map[string]string{"/usr/sbin/widgetd": "abababababababababababababababababababababababababababababababab"},
 		StaticChecks:      []pipeline.StaticCheck{{Name: "no shadow_t read/write", Passed: true}},
-		RPMPath:           "/home/u/rpmbuild/RPMS/noarch/widget-selinux-1.0.0-1.el9.noarch.rpm",
+		// RPMPath is deliberately empty here: RPM-subject binding is exercised
+		// where it matters (TestBuildStatementShape passes the RPM via extra,
+		// TestPassingVerdictRequiresRPMSubjectWhenRPMProduced sets RPMPath). The
+		// build requires an RPM subject only when RPMPath is set, so most pass
+		// cases bind via the entrypoint digest above.
 	}
 }
 

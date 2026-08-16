@@ -32,11 +32,10 @@ func TestFindCollisionsDetectsExecutables(t *testing.T) {
 	if cols[0].BaseType != "bin_t" || cols[0].WouldBeType != "myapp_exec_t" {
 		t.Errorf("collision fields: %+v", cols[0])
 	}
-	fc := GenerateFCExcluding(p, cols)
-	if strings.Contains(fc, "/usr/sbin/myapp") {
-		t.Errorf("colliding executable must be excluded from fc:\n%s", fc)
-	}
-	// An executable the distro does NOT claim is still emitted.
+	// The pipeline treats an executable collision as FATAL (the entrypoint can
+	// never get its exec type). It is deliberately NOT excluded from the fc,
+	// because excluding it would ship a policy that silently does not confine.
+	// An executable the distro does NOT claim is fine.
 	p2 := &profile.Profile{Name: "myapp", Executables: []string{"/opt/myapp/bin/myapp"}}
 	if cols := FindCollisions(p2, base); len(cols) != 0 {
 		t.Errorf("unclaimed executable must not collide: %+v", cols)
@@ -59,10 +58,7 @@ func TestFindCollisionsMatchesEscapedExecutable(t *testing.T) {
 		t.Fatalf("escaped-executable collision must be detected, got %+v", cols)
 	}
 	if cols[0].Path != "/usr/lib/plexmediaserver/Plex Media Server" {
-		t.Errorf("collision must record the RAW path for exclusion, got %q", cols[0].Path)
-	}
-	if fc := GenerateFCExcluding(p, cols); strings.Contains(fc, "Plex") {
-		t.Errorf("colliding spaced executable must be excluded from fc:\n%s", fc)
+		t.Errorf("collision must record the RAW path (for the fatal diagnostic), got %q", cols[0].Path)
 	}
 }
 

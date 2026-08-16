@@ -86,16 +86,11 @@ func GenerateFCExcluding(p *profile.Profile, cols []Collision) string {
 			trimmed.Paths = append(trimmed.Paths, pa)
 		}
 	}
-	// Executables collide too (GenerateFC emits an _exec_t line per executable),
-	// so a colliding executable must be dropped from the fc as well — otherwise
-	// GenerateFC re-emits the duplicate spec we set out to exclude (review
-	// finding).
-	trimmed.Executables = nil
-	for _, exe := range p.Executables {
-		if !skip[exe] {
-			trimmed.Executables = append(trimmed.Executables, exe)
-		}
-	}
+	// Only data/config PATHS are excluded here. An EXECUTABLE collision is NOT
+	// silently excluded: dropping the entrypoint's _exec_t line would leave the
+	// domain transition impossible and the service unconfined, so the pipeline
+	// treats an executable collision as fatal instead (see pipeline.observe).
+	// GenerateFCExcluding therefore never legitimately excludes an executable.
 	return GenerateFC(&trimmed)
 }
 

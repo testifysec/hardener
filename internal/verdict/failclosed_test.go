@@ -47,6 +47,7 @@ func TestVerdictFailsClosedPerGate(t *testing.T) {
 // downgrade to pass-with-exceptions, never plain pass.
 func TestAcceptedExceptionsAreNotFailures(t *testing.T) {
 	r := passingResult()
+	r.RPMPath = "" // testing the verdict value, not RPM binding
 	r.AcceptedExceptions = []pipeline.StaticCheck{{Name: "no shadow_t read/write", Detail: "allow ..."}}
 	if v := Build(r, Env{}, nil).Predicate.Verdict; v != "pass-with-exceptions" {
 		t.Errorf("got %q", v)

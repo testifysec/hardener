@@ -260,10 +260,33 @@ func Run(r vm.Runner, t *target.Target, opts Options) *Result {
 	for _, c := range res.Collisions {
 		opts.Log("[%s] base-policy collision: %s", t.Name, c.Render())
 	}
-	// A collided path is not ours to claim: drop it from the profile so
-	// (a) the .fc omits it, and (b) refinement stops expecting our label there
-	// and instead proposes access to the base type — which, being a shared
-	// type, lands in the human-review flags where it belongs.
+	// An ENTRYPOINT collision is fatal. If the base policy already labels the
+	// exact executable path, our .fc cannot relabel it to <app>_exec_t (a
+	// duplicate spec is dropped or rejected), so the init→domain transition
+	// never fires and the service runs unconfined as init_t — while restorecon
+	// still exits 0, so nothing downstream notices (review finding). Fail loudly
+	// instead of shipping a policy that silently does not confine.
+	execSet := map[string]bool{}
+	for _, e := range p.Executables {
+		execSet[e] = true
+	}
+	var execCols []string
+	for _, c := range res.Collisions {
+		if execSet[c.Path] {
+			execCols = append(execCols, c.Render())
+		}
+	}
+	if len(execCols) > 0 {
+		return fail("entrypoint label collision", fmt.Errorf(
+			"the base policy already labels the entrypoint(s) [%s]; %s cannot receive its exec type, so the domain transition into %s never occurs and the service would run unconfined. Remediation: move/rename the entrypoint, or remove the conflicting base file-context",
+			strings.Join(execCols, "; "), t.Name, policy.DomainType(p.Name)))
+	}
+	// A collided PATH (data/config, not an entrypoint) is recoverable: drop it
+	// from the profile so (a) the .fc omits it, and (b) refinement stops
+	// expecting our label there and instead proposes access to the base type —
+	// which, being a shared type, lands in the human-review flags where it
+	// belongs. The app keeps working; it is just less confined on that path,
+	// and the collision is reported.
 	if len(res.Collisions) > 0 {
 		collided := map[string]bool{}
 		for _, c := range res.Collisions {
@@ -702,9 +725,17 @@ func exercise(r vm.Runner, t *target.Target, dom string) ([]avc.Denial, bool, st
 	if sizeShrank(offset, postFields[0]) {
 		return nil, exOK, label, fmt.Errorf("audit log truncated during exercise (%s→%s bytes) — re-run", offset, postFields[0])
 	}
-	out, err := r.Run(fmt.Sprintf(`sudo tail -c +%s /var/log/audit/audit.log 2>/dev/null | grep -E '^type=(AVC|SELINUX_ERR|PATH)'; true`, "$(("+offset+"+1))"))
+	// Capture the RAW slice — do not pre-filter with `grep -E '^type=...'`. On a
+	// host with auditd name_format set, every record is prefixed with
+	// `node=<hostname> `, so an anchored `^type=` silently drops real AVCs and a
+	// denied domain looks clean. The parsers below already select AVC/
+	// SELINUX_ERR/PATH records (substring match, prefix-tolerant) and ignore the
+	// rest. Dropping the `; true` also means a failed `tail` (rotated/again
+	// truncated log, permission loss) surfaces as an error instead of an empty
+	// "no denials" result (review finding).
+	out, err := r.Run(fmt.Sprintf(`sudo tail -c +%s /var/log/audit/audit.log 2>/dev/null`, "$(("+offset+"+1))"))
 	if err != nil {
-		return nil, exOK, label, err
+		return nil, exOK, label, fmt.Errorf("reading audit slice: %w", err)
 	}
 	for _, te := range avc.ParseTransitionErrors(out) {
 		if te.NewType == dom {

@@ -239,21 +239,28 @@ Fulcio/TSA roots `<rel>.fulcio-root.pem` / `<rel>.tsa-root.pem`, and the
 `cilock` verifier `<rel>.cilock-linux-amd64` with its signed checksum
 `<rel>.cilock-linux-amd64.sha256(.dsse)`.
 
-**Step 1 — authenticate the verifier before running it.** The `cilock` you
-pull comes from the dist host, which is not a trust anchor: a compromised host
-could swap the verifier, its checksum, and the signature together. Authenticate
-it out-of-band with a DSSE verifier you already trust (an independently-obtained
-`cilock`, or `cosign`) — never let the downloaded `cilock` check itself. Run it
-only once both pass:
+**Step 1 — authenticate the verifier before running it.** Everything on the
+dist host — the verifier, its checksum, the signature, AND the `*.fulcio-root.pem`
+/ `*.tsa-root.pem` files — comes from the same place, so none of it is a trust
+anchor: a compromised host could swap all of them and forge a chain that
+validates against its own substituted roots. The anchor must come from an
+**independent channel**. Authenticate the verifier out-of-band with a DSSE
+verifier you already trust (an independently-obtained `cilock`, or `cosign`),
+anchoring on **that tool's built-in roots, or the TestifySec Fulcio/TSA roots
+obtained directly from TestifySec over an authenticated connection** — never the
+host-shipped `*.pem`, and never the downloaded `cilock` checking itself. Run the
+verifier only once both pass:
 
 ```bash
 # (a) integrity — the pulled verifier matches its signed checksum
 sha256sum -c <rel>.cilock-linux-amd64.sha256
-# (b) provenance — <rel>.cilock-linux-amd64.sha256.dsse was signed by THIS release identity:
-#     issuer   https://token.actions.githubusercontent.com
-#     identity https://github.com/testifysec/judge/.github/workflows/release-hardener.yml@refs/tags/hardener-v*
-#     roots    <rel>.fulcio-root.pem  (Fulcio)   <rel>.tsa-root.pem  (RFC 3161 TSA)
-# Reject the release if either check fails.
+# (b) provenance — verify <rel>.cilock-linux-amd64.sha256.dsse was signed by THIS
+#     release identity, anchoring on roots from the INDEPENDENT channel above
+#     (NOT the host-shipped *.pem, which are convenience copies to cross-check):
+#       issuer   https://token.actions.githubusercontent.com
+#       identity https://github.com/testifysec/judge/.github/workflows/release-hardener.yml@refs/tags/hardener-v*
+# Reject the release if either check fails, or if the host-shipped roots do not
+# match the independently-obtained ones.
 ```
 
 **Step 2 — verify the artifact with the now-trusted verifier.** The shipped
