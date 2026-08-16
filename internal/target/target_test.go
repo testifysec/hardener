@@ -276,3 +276,21 @@ party: third
 		t.Error("a multi-document manifest must be rejected")
 	}
 }
+
+// Round 35: a GENERIC parent directory component must not confer ownership just
+// because a compound app name starts with it — `system-widget` claiming
+// /etc/systemd/system would relabel every local unit file.
+func TestLoadRejectsGenericComponentTie(t *testing.T) {
+	m := `name: system-widget
+install: "true"
+unit: system-widget.service
+exercise: "true"
+executables:
+  - /opt/system-widget/bin/swd
+paths:
+  - { path: "/etc/systemd/system(/.*)?", kind: conf }
+`
+	if _, err := Load(write(t, m)); err == nil {
+		t.Error("a generic-component tie (system → system-widget) must be rejected without owned: true")
+	}
+}

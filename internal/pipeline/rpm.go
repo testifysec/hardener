@@ -58,16 +58,24 @@ func GenerateSpec(p *profile.Profile, revision string) string {
 				"_lc=$(stat -c '%%h' -- \"$_e\" 2>/dev/null); case \"$_lc\" in 1) : ;; *) printf 'ERROR: entrypoint %%s has hard-link count %%s (want exactly 1); refusing to relabel a shared inode\\n' \"$_e\" \"$_lc\" >&2; exit 1 ;; esac\n",
 			vm.ShellQuote(exe))
 	}
-	// PASS 2 — relabel the declared file-context roots. FAIL CLOSED when a root
-	// that EXISTS cannot be relabeled: suppressing the error with `|| :` let a
-	// data/config tree keep a broader base label while install still "succeeded"
-	// (review finding). A root that does not exist yet (a data dir the app creates
-	// on first run) is skipped, not an error.
-	for _, root := range RelabelRoots(p) {
+	// PASS 2 — relabel the declared file-context roots and VERIFY the resulting
+	// type. FAIL CLOSED when a root that EXISTS cannot be relabeled OR ends up with
+	// a type other than the one its kind maps to: suppressing the error with `|| :`
+	// let a data/config tree keep a broader base label while install "succeeded",
+	// and a higher-priority file_contexts.local rule can apply a broader type while
+	// restorecon still returns success (review finding). A root that does not exist
+	// yet (a data dir the app creates on first run) is skipped, not an error.
+	for _, pa := range p.Paths {
+		root := fcRoot(pa.Path)
+		if root == "" {
+			continue
+		}
+		wantType := policy.TypeForKind(p.Name, policy.KindFromString(pa.Kind))
 		fmt.Fprintf(&relabel,
 			"_r=%[1]s\n"+
-				"if [ -e \"$_r\" ]; then restorecon -RF -- \"$_r\" || { printf 'ERROR: could not relabel declared root %%s; refusing to leave it under a broader label\\n' \"$_r\" >&2; exit 1; }; fi\n",
-			vm.ShellQuote(root))
+				"if [ -e \"$_r\" ]; then restorecon -RF -- \"$_r\" || { printf 'ERROR: could not relabel declared root %%s; refusing to leave it under a broader label\\n' \"$_r\" >&2; exit 1; }; "+
+				"_rl=$(stat -c '%%C' -- \"$_r\" 2>/dev/null); case \"$_rl\" in *:%[2]s:*) : ;; *) printf 'ERROR: declared root %%s is labeled %%s, not %[2]s — a higher-priority file-context rule is overriding it\\n' \"$_r\" \"$_rl\" >&2; exit 1 ;; esac; fi\n",
+			vm.ShellQuote(root), wantType)
 	}
 	// PASS 3 — relabel + VERIFY each entrypoint. The label is load-bearing:
 	// without _exec_t the domain transition never fires and the service runs
