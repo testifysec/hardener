@@ -100,17 +100,40 @@ func GenerateSpec(p *profile.Profile, revision string) string {
 	if revision == "" {
 		revision = "0"
 	}
-	var relabel strings.Builder
-	// PASS 1 — validate EVERY entrypoint's hard-link count BEFORE any restorecon.
-	// The root relabels below run `restorecon -RF` over whole trees, which can
-	// include an entrypoint; doing the per-entrypoint link check only in pass 3
-	// meant a shared inode under a declared root was already relabeled before the
-	// check fired, and rollback could not restore the label its other links expect
-	// (review finding). A non-1 or unstattable count aborts before anything moves.
+	// pruneUnder builds the find(1) prune expression that skips any OTHER declared
+	// sub-root beneath root — those legitimately carry their own app type.
+	pruneUnder := func(root string) string {
+		prune := ""
+		for _, pa2 := range p.Paths {
+			other := fcRoot(pa2.Path)
+			if other == "" || other == root {
+				continue
+			}
+			if strings.HasPrefix(strings.TrimRight(other, "/")+"/", strings.TrimRight(root, "/")+"/") {
+				prune += fmt.Sprintf("-path %s -prune -o ", vm.ShellQuote(other))
+			}
+		}
+		return prune
+	}
+
+	// READ-ONLY PREFLIGHT — emitted into BOTH %pre and %post. Everything here only
+	// INSPECTS state, so it can run before rpm commits anything: a failure in %pre
+	// aborts the transaction cleanly, whereas the same failure in %post rolls back
+	// the module but leaves the package recorded as installed, making a retry of the
+	// same NEVRA a no-op and stranding the host without the intended confinement
+	// (review finding — round 73). It is re-run in %post as a recheck, because state
+	// can change between the two scriptlets.
+	var preflight strings.Builder
+	// Validate EVERY entrypoint's hard-link count BEFORE any restorecon. The root
+	// relabels run `restorecon -RF` over whole trees, which can include an
+	// entrypoint; checking per-entrypoint only at relabel time meant a shared inode
+	// under a declared root was already relabeled before the check fired, and
+	// rollback could not restore the label its other links expect (review finding).
+	// A non-1 or unstattable count aborts before anything moves.
 	for _, exe := range p.Executables {
-		fmt.Fprintf(&relabel,
+		fmt.Fprintf(&preflight,
 			"_e=%[1]s\n"+
-				"_lc=$(stat -c '%%h' -- \"$_e\" 2>/dev/null); case \"$_lc\" in 1) : ;; *) printf 'ERROR: entrypoint %%s has hard-link count %%s (want exactly 1); refusing to relabel a shared inode\\n' \"$_e\" \"$_lc\" >&2; exit 1 ;; esac\n",
+				"if [ -e \"$_e\" ]; then _lc=$(stat -c '%%h' -- \"$_e\" 2>/dev/null); case \"$_lc\" in 1) : ;; *) printf 'ERROR: entrypoint %%s has hard-link count %%s (want exactly 1); refusing to relabel a shared inode\\n' \"$_e\" \"$_lc\" >&2; exit 1 ;; esac; fi\n",
 			vm.ShellQuote(exe))
 	}
 	// PASS 2 — relabel the declared file-context roots and VERIFY the resulting
@@ -125,21 +148,7 @@ func GenerateSpec(p *profile.Profile, revision string) string {
 		if root == "" {
 			continue
 		}
-		wantType := policy.TypeForKind(p.Name, policy.KindFromString(pa.Kind))
-		// Prune any OTHER declared sub-root under THIS root from the descendant
-		// scan — those legitimately carry their own app type (mirror the
-		// verifier-side installPolicy check).
-		prune := ""
-		for _, pa2 := range p.Paths {
-			other := fcRoot(pa2.Path)
-			if other == "" || other == root {
-				continue
-			}
-			if strings.HasPrefix(strings.TrimRight(other, "/")+"/", strings.TrimRight(root, "/")+"/") {
-				prune += fmt.Sprintf("-path %s -prune -o ", vm.ShellQuote(other))
-			}
-		}
-		fmt.Fprintf(&relabel,
+		fmt.Fprintf(&preflight,
 			"_r=%[1]s\n"+
 				// The local file-context OVERLAP check runs REGARDLESS of existence: a
 				// rule UNDER our root would mislabel files the app creates on first run,
@@ -162,6 +171,33 @@ func GenerateSpec(p *profile.Profile, revision string) string {
 				// fails closed. Compare with slash-normalized index() in both directions.
 				"_ov=$(printf '%%s\\n' \"$_lfc\" | awk -v r=\"$_r\" '$1 ~ /^\\// { p=$1; m=match(p, /[].^$*+?(){}|[\\\\]/); if (m>0) p=substr(p,1,m-1); while (length(p)>1 && substr(p,length(p),1)==\"/\") p=substr(p,1,length(p)-1); if (p==\"\") next; rp=r\"/\"; pp=p\"/\"; if (p==r || index(rp,pp)==1 || index(pp,rp)==1) { print p; exit } }'); "+
 				"if [ -n \"$_ov\" ]; then printf 'ERROR: a local file-context rule (%%s) overlaps declared root %%s — it could override the app labeling; refusing\\n' \"$_ov\" \"$_r\" >&2; exit 1; fi\n"+
+				// HARD-LINKED DESCENDANTS. `restorecon -RF` relabels by INODE, so a
+				// multi-link regular file under a declared root silently retypes every
+				// alias — including aliases OUTSIDE the root. With a writable app type
+				// that hands the confined service access to an unrelated file (review
+				// finding — round 73). Entrypoints were already checked this way; the
+				// same standard now applies to everything a recursive relabel touches.
+				// Directories are excluded (their link count is always >1 from
+				// subdirectories); declared sub-roots are pruned as elsewhere. Fails
+				// closed on a find error, and stops at the first offender.
+				"if [ -e \"$_r\" ]; then _hl=$(find \"$_r\" %[2]s! -type d -links +1 -print -quit 2>/dev/null) || { printf 'ERROR: could not check for hard-linked files under %%s; refusing\\n' \"$_r\" >&2; exit 1; }; "+
+				"if [ -n \"$_hl\" ]; then printf 'ERROR: %%s under declared root %%s is a hard link (link count > 1); relabeling it would retype every alias, including paths outside the root — refusing\\n' \"$_hl\" \"$_r\" >&2; exit 1; fi; fi\n",
+			vm.ShellQuote(root), pruneUnder(root))
+	}
+
+	// MUTATION — relabel the declared roots and entrypoints, and VERIFY the
+	// resulting types. Runs only in %post, after the read-only preflight above has
+	// passed twice (once pre-commit, once here).
+	var relabel strings.Builder
+	for _, pa := range p.Paths {
+		root := fcRoot(pa.Path)
+		if root == "" {
+			continue
+		}
+		wantType := policy.TypeForKind(p.Name, policy.KindFromString(pa.Kind))
+		prune := pruneUnder(root)
+		fmt.Fprintf(&relabel,
+			"_r=%[1]s\n"+
 				"if [ -e \"$_r\" ]; then restorecon -RF -- \"$_r\" || { printf 'ERROR: could not relabel declared root %%s; refusing to leave it under a broader label\\n' \"$_r\" >&2; exit 1; }; "+
 				"_rl=$(stat -c '%%C' -- \"$_r\" 2>/dev/null); case \"$_rl\" in *:%[2]s:*) : ;; *) printf 'ERROR: declared root %%s is labeled %%s, not %[2]s — a higher-priority file-context rule is overriding it\\n' \"$_r\" \"$_rl\" >&2; exit 1 ;; esac; "+
 				// Verify DESCENDANTS, not just the root: a more-specific BASE-policy rule
@@ -354,6 +390,14 @@ if [ "$1" -ge 2 ]; then
         exit 1
     fi
 fi
+# READ-ONLY filesystem/policy validation (hard-linked entrypoints and descendants,
+# conflicting local file-contexts). Identical text runs again in %%post as a
+# recheck; running it HERE means a failure aborts the transaction before rpm
+# commits the payload and NEVRA, instead of "failing" an install that rpm still
+# records as done — which makes retrying the same NEVRA a no-op and can leave the
+# host without the intended confinement (review finding — round 73). Nothing below
+# mutates state, so it is safe to run pre-commit.
+%[10]s
 
 %%post
 # Fail closed WITH transactional rollback. Loading the module then failing
@@ -488,7 +532,10 @@ trap _rollback EXIT
     echo "ERROR: semodule failed to load the %[1]s policy module; the application is NOT confined" >&2
     exit 1
 fi
-%[2]s%[3]s
+# RECHECK the read-only validation immediately before mutating labels. It already
+# ran in %%pre (pre-commit, where a failure aborts cleanly), but state can change
+# between scriptlets — so verify again here, right before the first restorecon.
+%[10]s%[2]s%[3]s
 # Reconcile REMOVED file-context roots BEFORE declaring success: any root the
 # previous install labeled that the new profile no longer claims is restored to
 # its base label — else the files keep a now-undeclared app type or a dangling
@@ -531,5 +578,5 @@ fi
 %%{_datadir}/selinux/packages/%[1]s.pp
 %%{_datadir}/selinux/hardener/%[1]s.fc
 %%{_datadir}/selinux/hardener/%[1]s.roots
-`, app, relabel.String(), ports.String(), portsDel.String(), revision, restore.String(), appPortType, reconcile, rootsContent.String())
+`, app, relabel.String(), ports.String(), portsDel.String(), revision, restore.String(), appPortType, reconcile, rootsContent.String(), preflight.String())
 }

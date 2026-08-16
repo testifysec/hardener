@@ -66,9 +66,13 @@ func TestSpecOverlapCheckUsesLiteralStem(t *testing.T) {
 	if strings.Contains(spec, `substr(p,length(p)-5)=="(/.*)?"`) {
 		t.Error("overlap awk must no longer strip only the exact (/.*)? suffix")
 	}
+	// The overlap check must not be gated on the ROOT existing — a not-yet-created
+	// data dir must still be protected from an overlapping local rule. Compare
+	// against the root-existence gate specifically (`[ -e "$_r" ]`); other `[ -e ]`
+	// guards (e.g. the entrypoint hard-link check) are unrelated.
 	ov := strings.Index(spec, "_ov=$(printf")
-	ex := strings.Index(spec, "[ -e ")
+	ex := strings.Index(spec, `[ -e "$_r" ]`)
 	if ov < 0 || ex < 0 || ov > ex {
-		t.Errorf("overlap check must precede the [ -e ] existence gate (ov=%d ex=%d)", ov, ex)
+		t.Errorf("overlap check must precede the root existence gate (ov=%d ex=%d)", ov, ex)
 	}
 }
