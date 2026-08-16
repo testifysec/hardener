@@ -71,6 +71,7 @@ func TestBailsWhenPermissiveExerciseFailsWithNoDenials(t *testing.T) {
 		responses: map[string]string{
 			"getenforce":        "Enforcing\nactive",
 			"stat -c '%s %i'":   "0 4242",
+			"stat -c '%i'":      "4242",
 			"systemctl restart": "",
 			"sha256sum":         "abababababababababababababababababababababababababababababababab  /opt/widget/bin/widgetd",
 		},

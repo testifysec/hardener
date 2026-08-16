@@ -125,11 +125,17 @@ install -D -m 0644 %%{SOURCE1} %%{buildroot}%%{_datadir}/selinux/hardener/%[1]s.
 %%post
 # Fail closed WITH rollback: loading the module then failing entrypoint/port
 # validation must not leave the module and partial port mappings installed after
-# a reported install failure (review finding). A trap undoes them on any early
-# exit; the flag disarms it only once every step has succeeded.
+# a reported install failure (review finding). The rollback runs ONLY on a FRESH
+# install ($1 == 1), where "undo everything" correctly restores the pre-install
+# state (nothing). On an UPGRADE ($1 >= 2) it does NOT remove the module or the
+# ports: semodule -i already replaced the prior module, and tearing it down would
+# leave the service with NO policy — worse than the flagged issue. The failure is
+# still reported via the non-zero exit (review finding).
+_op=$1
 _ok=0
 _rollback() {
     [ "$_ok" = 1 ] && return 0
+    [ "$_op" = 1 ] || return 0
 %[4]s    semodule -r %[1]s 2>/dev/null || :
 }
 trap _rollback EXIT

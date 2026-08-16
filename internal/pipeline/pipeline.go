@@ -823,6 +823,18 @@ func exercise(r vm.Runner, t *target.Target, dom string) ([]avc.Denial, bool, ru
 	if err != nil {
 		return nil, exOK, run, fmt.Errorf("reading audit slice: %w", err)
 	}
+	// Re-stat the inode AFTER the read. The rotation check above happens before
+	// a SEPARATE tail command; a rotation in that window would make tail read the
+	// NEW file at the stale offset and return an empty slice successfully — a
+	// false zero-denial pass (review finding). If the inode changed across the
+	// read, our offset is meaningless and the slice cannot be trusted.
+	post2, err := r.Run("sudo stat -c '%i' /var/log/audit/audit.log")
+	if err != nil {
+		return nil, exOK, run, fmt.Errorf("audit log post-read stat: %w", err)
+	}
+	if strings.TrimSpace(post2) != startInode {
+		return nil, exOK, run, fmt.Errorf("audit log rotated during read (inode %s→%s) — re-run", startInode, strings.TrimSpace(post2))
+	}
 	for _, te := range avc.ParseTransitionErrors(out) {
 		if te.NewType == dom {
 			return nil, exOK, run, fmt.Errorf(
