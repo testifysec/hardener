@@ -88,6 +88,19 @@ func Load(path string) (*Target, error) {
 			return nil, fmt.Errorf("%s: paths[%d] (%s): unknown kind %q — must be one of exec, conf, var_lib, log, runtime, content, tmp, cache, unit", path, i, pa.Path, pa.Kind)
 		}
 	}
+	// Port proto/number are interpolated into root %post/%postun `semanage port`
+	// commands, so an unvalidated protocol string could carry shell
+	// metacharacters into install-time execution — and an unsupported protocol
+	// is silently dropped from the TE socket rules (review finding). Constrain
+	// them here: exactly tcp or udp, and a port in 1–65535.
+	for i, po := range t.Ports {
+		if po.Proto != "tcp" && po.Proto != "udp" {
+			return nil, fmt.Errorf("%s: ports[%d]: protocol must be tcp or udp (got %q)", path, i, po.Proto)
+		}
+		if po.Port < 1 || po.Port > 65535 {
+			return nil, fmt.Errorf("%s: ports[%d]: port must be 1–65535 (got %d)", path, i, po.Port)
+		}
+	}
 	return &t, nil
 }
 

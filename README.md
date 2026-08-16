@@ -263,13 +263,30 @@ sha256sum -c <rel>.cilock-linux-amd64.sha256
 # match the independently-obtained ones.
 ```
 
-**Step 2 — verify the artifact with the now-trusted verifier.** The shipped
+**Step 2 — authenticate the attestation archive BEFORE extracting it.** The
+`.intoto.tgz` is an untrusted archive off the dist host until proven otherwise;
+extracting first would let a swapped archive (a decompression bomb, or a
+path-traversal entry) attack your machine before `cilock` ever runs. Verify its
+signed checksum, then extract into an isolated empty directory with safe flags:
+
+```bash
+# integrity + provenance of the archive itself (same signed-checksum pattern and
+# independent root anchor as the verifier in Step 1)
+sha256sum -c <rel>.intoto.tgz.sha256
+#   then verify <rel>.intoto.tgz.sha256.dsse against the release identity.
+# extract into a fresh dir; GNU tar strips a leading '/' and rejects '..', and
+# these flags drop ownership/permission surprises. Cap the size first.
+test "$(stat -c%s <rel>.intoto.tgz)" -lt 10485760 || { echo "archive too large" >&2; exit 1; }
+mkdir attestations
+tar --no-same-owner --no-same-permissions -xzf <rel>.intoto.tgz -C attestations
+```
+
+**Step 3 — verify the artifact with the now-trusted verifier.** The shipped
 `cilock` has the Fulcio/TSA roots and the pinned policy-signer identity compiled
 in, so no `--policy-*` trust flags are needed and a policy signed by any other
 identity is rejected:
 
 ```bash
-mkdir attestations && tar -xzf <rel>.intoto.tgz -C attestations
 chmod +x <rel>.cilock-linux-amd64
 ./<rel>.cilock-linux-amd64 verify <rel> \
   --policy <rel>.policy.json.signed \

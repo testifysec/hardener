@@ -136,3 +136,34 @@ func TestReadingOwnContentNotFlagged(t *testing.T) {
 		t.Errorf("reading/executing own content must not be flagged: %+v", res.Flags)
 	}
 }
+
+// Round 17: a bind of a FOREIGN port type (ssh_port_t, unreserved_port_t) is a
+// broad grant that must go to review — the blanket _port_t skip let those be
+// auto-accepted as the app's declared port.
+func TestForeignPortTypeFlagged(t *testing.T) {
+	p := widgetProfile()
+	ds := []avc.Denial{{
+		SourceType: "widget_t", TargetType: "ssh_port_t", Class: "tcp_socket",
+		Perms: []string{"name_bind"},
+	}}
+	res := Refine(p, ds)
+	if len(res.Flags) != 1 {
+		t.Fatalf("foreign port bind must be flagged, got %+v", res)
+	}
+	if len(res.AllowRules) != 0 {
+		t.Errorf("flagged foreign port must not auto-apply: %v", res.AllowRules)
+	}
+}
+
+// The app's OWN port type is declared by the module, so binding it is expected
+// and must NOT be flagged.
+func TestOwnPortTypeNotFlagged(t *testing.T) {
+	p := widgetProfile()
+	ds := []avc.Denial{{
+		SourceType: "widget_t", TargetType: "widget_port_t", Class: "tcp_socket",
+		Perms: []string{"name_bind"},
+	}}
+	if res := Refine(p, ds); len(res.Flags) != 0 {
+		t.Errorf("own port type must not be flagged: %+v", res.Flags)
+	}
+}
