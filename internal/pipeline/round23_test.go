@@ -13,8 +13,11 @@ import (
 func TestSpecReconcilesWithNoPorts(t *testing.T) {
 	p := &profile.Profile{Name: "widget", Executables: []string{"/opt/widget/bin/widgetd"}}
 	spec := GenerateSpec(p, "1")
-	if !strings.Contains(spec, `semanage port -l | awk '$1=="widget_port_t"`) {
-		t.Errorf("reconcile must run even with no declared ports:\n%s", spec)
+	// Round 28: the listing is captured and validated before the awk loop (fail
+	// closed on enumeration error), so it no longer inlines `semanage port -l | awk`.
+	if !strings.Contains(spec, `_portlist="$(semanage port -l 2>/dev/null)"`) ||
+		!strings.Contains(spec, `awk '$1=="widget_port_t"`) {
+		t.Errorf("reconcile must capture the listing and run even with no declared ports:\n%s", spec)
 	}
 	// Rollback must restore pruned mappings on upgrade failure.
 	if !strings.Contains(spec, "for _row in $_pruned;") {
