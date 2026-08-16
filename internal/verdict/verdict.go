@@ -242,15 +242,25 @@ func BuildOrErr(res *pipeline.Result, env Env, extra []Subject) (Statement, erro
 		// digests do not substitute for the RPM subject.
 		if res.RPMPath != "" {
 			want := RPMSubjectName(res.RPMPath)
-			bound := false
+			var boundDigest string
 			for _, s := range subjects {
 				if s.Name == want {
-					bound = true
+					boundDigest = s.Digest["sha256"]
 					break
 				}
 			}
-			if !bound {
+			if boundDigest == "" {
 				return Statement{}, fmt.Errorf("passing verdict produced RPM %q but it is not a bound subject; refusing to attest a package unbound to its policy", want)
+			}
+			// The bound digest must equal the digest the verifier COMPUTED for the
+			// built RPM. Matching only the basename let a valid-but-wrong digest
+			// (a different package under the same name) receive a passing
+			// attestation (review finding).
+			if res.RPMSHA256 == "" {
+				return Statement{}, fmt.Errorf("RPM %q was produced but its authoritative sha256 was not computed; refusing to attest an unverifiable package", want)
+			}
+			if boundDigest != res.RPMSHA256 {
+				return Statement{}, fmt.Errorf("RPM subject %q digest %s does not match the computed package digest %s; refusing to attest a mismatched package", want, boundDigest, res.RPMSHA256)
 			}
 		}
 	}

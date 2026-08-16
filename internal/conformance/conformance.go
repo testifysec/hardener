@@ -25,6 +25,14 @@ import (
 	"github.com/testifysec/hardener/internal/profile"
 )
 
+// foreignKey identifies one foreign access at type:class:permission granularity,
+// so read/write/execute on the same type are distinct entries in the
+// declaration comparison (review finding — type-only normalization let a
+// declared read silently cover a new write/execute).
+func foreignKey(target, class, perm string) string {
+	return target + ":" + class + ":" + perm
+}
+
 // Observed is the normalized behavior summary extracted from a verified run.
 type Observed struct {
 	Capabilities     []string       `yaml:"capabilities,omitempty"`
@@ -82,19 +90,22 @@ func ExtractObserved(p *profile.Profile, rules []policy.AllowRule) Observed {
 			// second-party conformance as undeclared outbound access (review
 			// finding). Surface any non-bind port access as a foreign type so
 			// it still faces the declaration comparison.
-			nonBind := false
 			for _, perm := range r.Perms {
 				if perm == "name_bind" {
 					bindSet[r.Target] = true
 				} else {
-					nonBind = true
+					foreignSet[foreignKey(r.Target, r.Class, perm)] = true
 				}
 			}
-			if nonBind {
-				foreignSet[r.Target] = true
-			}
 		default:
-			foreignSet[r.Target] = true
+			// Key foreign access by type:class:PERMISSION, not type alone — a
+			// declared READ of cert_t must not silently permit a new WRITE or
+			// EXECUTE to cert_t, which type-only normalization let pass as
+			// identical (review finding). Per-permission granularity also keeps
+			// "used less than declared" from becoming a false finding.
+			for _, perm := range r.Perms {
+				foreignSet[foreignKey(r.Target, r.Class, perm)] = true
+			}
 		}
 	}
 	obs.Capabilities = sortedKeys(capSet)

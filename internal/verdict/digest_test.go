@@ -48,16 +48,23 @@ func TestBuildRequiresAValidSubject(t *testing.T) {
 func TestPassingVerdictRequiresRPMSubjectWhenRPMProduced(t *testing.T) {
 	r := passingResult()
 	r.RPMPath = "/home/u/rpmbuild/RPMS/noarch/widget-selinux-1.0.0-1.el9.noarch.rpm"
+	r.RPMSHA256 = goodSHA // the authoritative computed digest
 	if _, err := BuildOrErr(r, Env{}, nil); err == nil {
 		t.Fatal("an RPM-producing pass must bind the RPM subject, even with entrypoint digests")
 	}
-	// The matching RPM subject satisfies it.
+	// The matching RPM subject (name AND digest) satisfies it.
 	if _, err := BuildOrErr(r, Env{}, []Subject{{Name: "widget-selinux-1.0.0-1.el9.noarch.rpm", SHA256: goodSHA}}); err != nil {
 		t.Fatalf("binding the produced RPM must succeed: %v", err)
 	}
 	// A differently-named RPM subject does not satisfy the requirement.
 	if _, err := BuildOrErr(r, Env{}, []Subject{{Name: "some-other.rpm", SHA256: goodSHA}}); err == nil {
 		t.Fatal("a non-matching RPM subject must not satisfy the RPM-binding requirement")
+	}
+	// Round 21: a valid-but-WRONG digest under the right name must be rejected —
+	// the bound digest must equal the computed package digest.
+	wrong := "cd" + goodSHA[2:]
+	if _, err := BuildOrErr(r, Env{}, []Subject{{Name: "widget-selinux-1.0.0-1.el9.noarch.rpm", SHA256: wrong}}); err == nil {
+		t.Fatal("an RPM subject whose digest differs from the computed package digest must be rejected")
 	}
 }
 

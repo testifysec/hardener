@@ -34,8 +34,8 @@ func TestExtractObserved(t *testing.T) {
 	if !reflectEq(obs.Capabilities, []string{"setgid", "setuid"}) {
 		t.Errorf("capabilities: %v", obs.Capabilities)
 	}
-	if !reflectEq(obs.ForeignTypes, []string{"cert_t"}) {
-		t.Errorf("foreign types: %v (must exclude own types and port types)", obs.ForeignTypes)
+	if !reflectEq(obs.ForeignTypes, []string{"cert_t:file:open", "cert_t:file:read"}) {
+		t.Errorf("foreign types: %v (type:class:perm, excluding own and port types)", obs.ForeignTypes)
 	}
 	if !reflectEq(obs.ForeignPortBinds, []string{"http_cache_port_t"}) {
 		t.Errorf("foreign port binds: %v", obs.ForeignPortBinds)
@@ -63,7 +63,7 @@ func TestForeignPortConnectSurfacesAsForeignType(t *testing.T) {
 		{Source: "widget_t", Target: "http_port_t", Class: "tcp_socket", Perms: []string{"name_connect"}},
 	}
 	obs := ExtractObserved(widgetProfile(), rules)
-	if !has(obs.ForeignTypes, "http_port_t") {
+	if !has(obs.ForeignTypes, "http_port_t:tcp_socket:name_connect") {
 		t.Errorf("outbound name_connect to http_port_t must surface as a foreign type, got ForeignTypes=%v", obs.ForeignTypes)
 	}
 	if has(obs.ForeignPortBinds, "http_port_t") {
@@ -75,7 +75,7 @@ func TestForeignPortConnectSurfacesAsForeignType(t *testing.T) {
 	both := ExtractObserved(widgetProfile(), []policy.AllowRule{
 		{Source: "widget_t", Target: "dns_port_t", Class: "tcp_socket", Perms: []string{"name_bind", "name_connect"}},
 	})
-	if !has(both.ForeignPortBinds, "dns_port_t") || !has(both.ForeignTypes, "dns_port_t") {
+	if !has(both.ForeignPortBinds, "dns_port_t") || !has(both.ForeignTypes, "dns_port_t:tcp_socket:name_connect") {
 		t.Errorf("bind+connect must record both: binds=%v types=%v", both.ForeignPortBinds, both.ForeignTypes)
 	}
 }
@@ -212,4 +212,19 @@ func reflectEq(a, b []string) bool {
 		}
 	}
 	return true
+}
+
+// Round 21: conformance keys foreign access at type:class:PERMISSION, so a
+// declared READ of cert_t does not silently permit a new WRITE (escalation),
+// while using LESS than declared stays clean.
+func TestForeignAccessEscalationFlagged(t *testing.T) {
+	decl := &profile.Declaration{ForeignTypes: []string{"cert_t:file:read", "cert_t:file:open"}}
+	esc := Compare(decl, Observed{ForeignTypes: []string{"cert_t:file:open", "cert_t:file:read", "cert_t:file:write"}})
+	if len(esc.Undeclared) != 1 || esc.Undeclared[0].Item != "cert_t:file:write" {
+		t.Errorf("an undeclared cert_t write must be flagged as escalation, got %+v", esc.Undeclared)
+	}
+	sub := Compare(decl, Observed{ForeignTypes: []string{"cert_t:file:read"}})
+	if len(sub.Undeclared) != 0 {
+		t.Errorf("using less than declared must not be an undeclared finding: %+v", sub.Undeclared)
+	}
 }

@@ -130,3 +130,24 @@ func TestParseNodePrefixedRecords(t *testing.T) {
 		t.Errorf("ParseLogWithPaths must return the node=-prefixed denial, got %+v", ds)
 	}
 }
+
+// Round 21: distinct paths that share an SELinux type must NOT be merged into
+// one denial — merging dropped a path and let a per-path classification (a
+// relabel, or which file is the mislabeled entrypoint) apply to the wrong file.
+func TestMergeKeepsDistinctPaths(t *testing.T) {
+	out := Merge([]Denial{
+		{SourceType: "init_t", TargetType: "app_content_t", Class: "file", Perms: []string{"execute"}, Path: "/opt/a", Ino: "1"},
+		{SourceType: "init_t", TargetType: "app_content_t", Class: "file", Perms: []string{"execute"}, Path: "/opt/b", Ino: "2"},
+	})
+	if len(out) != 2 {
+		t.Fatalf("distinct paths with the same type must not be merged, got %d: %+v", len(out), out)
+	}
+	// The same path still unions perms into one denial.
+	same := Merge([]Denial{
+		{SourceType: "s_t", TargetType: "t_t", Class: "file", Perms: []string{"read"}, Path: "/x", Ino: "1"},
+		{SourceType: "s_t", TargetType: "t_t", Class: "file", Perms: []string{"write"}, Path: "/x", Ino: "1"},
+	})
+	if len(same) != 1 || len(same[0].Perms) != 2 {
+		t.Errorf("same path+type must union perms into one denial: %+v", same)
+	}
+}
