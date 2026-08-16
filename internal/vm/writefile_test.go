@@ -1,6 +1,7 @@
 package vm
 
 import (
+	"os/exec"
 	"strings"
 	"testing"
 	"time"
@@ -101,5 +102,41 @@ func TestCappedWriterBoundsOutputAndFailsClosed(t *testing.T) {
 	// Subsequent writes keep failing rather than resuming.
 	if _, err := w.Write([]byte("c")); err == nil {
 		t.Error("writes after the limit must keep failing")
+	}
+}
+
+// Round 75: returning an error from the capped writer stops the copy goroutine but
+// does NOT stop the child — a process emitting continuous output would block on a
+// full pipe until the 10-minute timeout. The writer must kill the command as soon
+// as the cap is exceeded.
+func TestRunCappedKillsChildOnOverflow(t *testing.T) {
+	// yes(1) emits unbounded output; with a tiny cap this must return promptly
+	// rather than hang until a timeout.
+	cmd := exec.Command("sh", "-c", "yes hello")
+	w := &cappedWriter{limit: 4096}
+	w.onOver = func() {
+		if cmd.Process != nil {
+			_ = cmd.Process.Kill()
+		}
+	}
+	cmd.Stdout = w
+	cmd.Stderr = w
+	done := make(chan error, 1)
+	start := time.Now()
+	go func() { done <- cmd.Run() }()
+	select {
+	case <-done:
+	case <-time.After(20 * time.Second):
+		_ = cmd.Process.Kill()
+		t.Fatal("runCapped must kill the child on overflow, not block until the timeout")
+	}
+	if !w.over {
+		t.Error("the writer must have latched over=true")
+	}
+	if w.buf.Len() > w.limit {
+		t.Errorf("buffered %d bytes, must not exceed the cap %d", w.buf.Len(), w.limit)
+	}
+	if elapsed := time.Since(start); elapsed > 20*time.Second {
+		t.Errorf("took %s — the child was not killed promptly", elapsed)
 	}
 }
