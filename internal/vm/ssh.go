@@ -1,6 +1,7 @@
 package vm
 
 import (
+	"context"
 	"encoding/base64"
 	"fmt"
 	"os/exec"
@@ -41,20 +42,16 @@ func (s *SSH) Run(script string) (string, error) {
 	if timeout == 0 {
 		timeout = 10 * time.Minute
 	}
-	cmd := exec.Command("ssh", s.sshArgs()...)
+	// CommandContext kills the process on deadline itself — the previous manual
+	// goroutine + cmd.Process.Kill() panicked when the timeout fired before
+	// CombinedOutput started the process (Process still nil), e.g. with a small
+	// timeout (review finding).
+	ctx, cancel := context.WithTimeout(context.Background(), timeout)
+	defer cancel()
+	cmd := exec.CommandContext(ctx, "ssh", s.sshArgs()...)
 	cmd.Stdin = strings.NewReader(script)
-	done := make(chan struct{})
-	var out []byte
-	var err error
-	go func() {
-		out, err = cmd.CombinedOutput()
-		close(done)
-	}()
-	select {
-	case <-done:
-	case <-time.After(timeout):
-		_ = cmd.Process.Kill()
-		<-done
+	out, err := cmd.CombinedOutput()
+	if ctx.Err() == context.DeadlineExceeded {
 		return string(out), fmt.Errorf("ssh timeout after %s", timeout)
 	}
 	if err != nil {

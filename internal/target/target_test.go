@@ -83,7 +83,9 @@ func TestLoadRejectsUnknownKind(t *testing.T) {
 
 // Every valid kind still loads.
 func TestLoadAcceptsKnownKinds(t *testing.T) {
-	for _, ok := range []string{"conf", "var_lib", "log", "runtime", "content", "tmp", "cache", "unit", "exec"} {
+	// "exec" is a valid Kind but is rejected in PATHS (entrypoints go in
+	// executables) — see TestLoadRejectsExecPaths.
+	for _, ok := range []string{"conf", "var_lib", "log", "runtime", "content", "tmp", "cache", "unit"} {
 		body := strings.Replace(validManifest, "%s", ok, 1)
 		if _, err := Load(write(t, body)); err != nil {
 			t.Errorf("kind %q must load, got %v", ok, err)
@@ -113,5 +115,25 @@ func TestLoadRejectsBroadPaths(t *testing.T) {
 		if _, err := Load(write(t, fmt.Sprintf(broadPathManifest, ok))); err != nil {
 			t.Errorf("bounded path %q must load: %v", ok, err)
 		}
+	}
+}
+
+// Round 23: kind:exec in a PATH bypasses the app-ownership check (GenerateFC
+// maps it straight to <app>_exec_t) — it must be rejected; entrypoints go in
+// the executables list.
+func TestLoadRejectsExecPaths(t *testing.T) {
+	m := `name: widget
+install: "true"
+unit: widget.service
+exercise: "true"
+executables:
+  - /opt/widget/bin/widgetd
+paths:
+  - { path: "/usr/bin/curl", kind: exec }
+`
+	if _, err := Load(write(t, m)); err == nil {
+		t.Error("kind:exec in paths must be rejected")
+	} else if !strings.Contains(err.Error(), "exec") {
+		t.Errorf("error should mention exec: %v", err)
 	}
 }
