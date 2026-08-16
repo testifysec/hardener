@@ -46,32 +46,39 @@ func GenerateSpec(p *profile.Profile, revision string) string {
 		revision = "0"
 	}
 	var relabel strings.Builder
-	for _, root := range RelabelRoots(p) {
-		fmt.Fprintf(&relabel, "restorecon -RF -- %s 2>/dev/null || :\n", vm.ShellQuote(root))
-	}
-	// The entrypoint label is load-bearing: without _exec_t the domain
-	// transition never fires and the service runs unconfined. Relabel it, FAIL
-	// if restorecon errors, and then VERIFY the resulting type is actually
-	// <app>_exec_t — restorecon also "succeeds" when a higher-priority local
-	// file-context rule applies a different type, which would silently leave the
-	// service unconfined (review finding). Paths are single-quoted so a manifest
-	// path can never inject shell into the customer's %post.
+	// PASS 1 — validate EVERY entrypoint's hard-link count BEFORE any restorecon.
+	// The root relabels below run `restorecon -RF` over whole trees, which can
+	// include an entrypoint; doing the per-entrypoint link check only in pass 3
+	// meant a shared inode under a declared root was already relabeled before the
+	// check fired, and rollback could not restore the label its other links expect
+	// (review finding). A non-1 or unstattable count aborts before anything moves.
 	for _, exe := range p.Executables {
-		// Bind the path to a shell variable ONCE from its single-quoted literal,
-		// then reference "$_e" everywhere — including the error messages. The
-		// round-16 fix quoted the restorecon argument but still interpolated the
-		// raw path into double-quoted echo diagnostics, where $(...) in a
-		// manifest path would execute as root on relabel failure (review
-		// finding). Variable expansion does not re-evaluate the value, and
-		// printf '%%s' prints it literally.
 		fmt.Fprintf(&relabel,
 			"_e=%[1]s\n"+
-				// Refuse to relabel a HARD-LINKED entrypoint: restorecon changes the
-				// inode's label, so a shared inode (link count > 1, e.g. hard-linked to
-				// /usr/bin/bash) would relabel every other link into <app>_exec_t on the
-				// CUSTOMER host too — the verifier-side check alone is not enough (review
-				// finding). Privileged stat at %post; any non-1 or unstattable count fails.
-				"_lc=$(stat -c '%%h' -- \"$_e\" 2>/dev/null); case \"$_lc\" in 1) : ;; *) printf 'ERROR: entrypoint %%s has hard-link count %%s (want exactly 1); refusing to relabel a shared inode\\n' \"$_e\" \"$_lc\" >&2; exit 1 ;; esac\n"+
+				"_lc=$(stat -c '%%h' -- \"$_e\" 2>/dev/null); case \"$_lc\" in 1) : ;; *) printf 'ERROR: entrypoint %%s has hard-link count %%s (want exactly 1); refusing to relabel a shared inode\\n' \"$_e\" \"$_lc\" >&2; exit 1 ;; esac\n",
+			vm.ShellQuote(exe))
+	}
+	// PASS 2 — relabel the declared file-context roots. FAIL CLOSED when a root
+	// that EXISTS cannot be relabeled: suppressing the error with `|| :` let a
+	// data/config tree keep a broader base label while install still "succeeded"
+	// (review finding). A root that does not exist yet (a data dir the app creates
+	// on first run) is skipped, not an error.
+	for _, root := range RelabelRoots(p) {
+		fmt.Fprintf(&relabel,
+			"_r=%[1]s\n"+
+				"if [ -e \"$_r\" ]; then restorecon -RF -- \"$_r\" || { printf 'ERROR: could not relabel declared root %%s; refusing to leave it under a broader label\\n' \"$_r\" >&2; exit 1; }; fi\n",
+			vm.ShellQuote(root))
+	}
+	// PASS 3 — relabel + VERIFY each entrypoint. The label is load-bearing:
+	// without _exec_t the domain transition never fires and the service runs
+	// unconfined. restorecon also "succeeds" when a higher-priority local
+	// file-context rule applies a different type, so verify the resulting type is
+	// actually <app>_exec_t (review finding). Paths are single-quoted so a
+	// manifest path can never inject shell into the customer's %post; "$_e" is a
+	// variable expansion (never re-evaluated) and printf '%%s' prints it literally.
+	for _, exe := range p.Executables {
+		fmt.Fprintf(&relabel,
+			"_e=%[1]s\n"+
 				"restorecon -F -- \"$_e\" || { printf 'ERROR: cannot label entrypoint %%s; the service would run unconfined\\n' \"$_e\" >&2; exit 1; }\n"+
 				"_lbl=$(stat -c '%%C' -- \"$_e\" 2>/dev/null); case \"$_lbl\" in *:%[2]s:*) : ;; *) printf 'ERROR: entrypoint %%s is labeled %%s, not %[2]s — a higher-priority file-context rule is overriding it; the service would run unconfined\\n' \"$_e\" \"$_lbl\" >&2; exit 1 ;; esac\n",
 			vm.ShellQuote(exe), execType)

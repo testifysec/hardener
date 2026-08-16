@@ -48,8 +48,16 @@ func TestVerdictFailsClosedPerGate(t *testing.T) {
 func TestAcceptedExceptionsAreNotFailures(t *testing.T) {
 	r := passingResult()
 	r.RPMPath = "" // testing the verdict value, not RPM binding
+	// passingResult() already carries an accepted review flag, which alone yields
+	// pass-with-exceptions — so clear Flags to prove the AcceptedExceptions path is
+	// what drives the verdict, not the pre-existing flag (review finding).
+	r.Flags = nil
+	r.FlagsAccepted = false
+	if v := Build(r, Env{}, nil).Predicate.Verdict; v == "pass-with-exceptions" {
+		t.Errorf("with Flags cleared, verdict should be plain pass before adding exceptions, got %q", v)
+	}
 	r.AcceptedExceptions = []pipeline.StaticCheck{{Name: "no shadow_t read/write", Detail: "allow ..."}}
 	if v := Build(r, Env{}, nil).Predicate.Verdict; v != "pass-with-exceptions" {
-		t.Errorf("got %q", v)
+		t.Errorf("an accepted exception alone must yield pass-with-exceptions, got %q", v)
 	}
 }

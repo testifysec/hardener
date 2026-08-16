@@ -7,6 +7,7 @@ import (
 	"os"
 	"path/filepath"
 	"strings"
+	"unicode"
 
 	"gopkg.in/yaml.v3"
 
@@ -180,9 +181,14 @@ func Load(path string) (*Target, error) {
 		// overlapping base-policy patterns (review finding). Reject any claim
 		// whose literal root is a bare system directory.
 		// A newline or control byte in a path lets a manifest inject additional
-		// file-context records (each fc line is newline-delimited) — reject them.
-		if strings.ContainsAny(pa.Path, "\n\r\x00") {
-			return nil, fmt.Errorf("%s: paths[%d]: path contains a newline or control character (file-context injection)", path, i)
+		// file-context records use WHITESPACE as field delimiters, so ANY space,
+		// tab, newline, or control byte lets a value like "/etc/widget/config --"
+		// split into a path plus an extra fc field/selector and relabel unintended
+		// files (review finding). Reject all whitespace and control characters.
+		if strings.ContainsFunc(pa.Path, func(r rune) bool {
+			return unicode.IsSpace(r) || unicode.IsControl(r)
+		}) {
+			return nil, fmt.Errorf("%s: paths[%d]: path contains whitespace or a control character (file-context field injection)", path, i)
 		}
 		// Reject path traversal. A regex like /etc/widget/../..(/.*)? passes the
 		// textual ownership and broad-root checks, but its literal root

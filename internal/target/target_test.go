@@ -242,3 +242,17 @@ partyy: second
 		t.Error("an unknown/misspelled manifest field must be rejected")
 	}
 }
+
+// Round 32: whitespace/control in a path is a file-context FIELD injection —
+// "/etc/widget/config --" splits into a path plus an fc selector.
+func TestLoadRejectsWhitespaceInPath(t *testing.T) {
+	for _, bad := range []string{
+		"/etc/widget/config --",
+		"/etc/widget\tconfig(/.*)?",
+		"/etc/widget config(/.*)?",
+	} {
+		if _, err := Load(write(t, fmt.Sprintf(pathManifest, bad))); err == nil {
+			t.Errorf("path %q with whitespace must be rejected", bad)
+		}
+	}
+}
