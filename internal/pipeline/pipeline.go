@@ -145,10 +145,17 @@ func Run(r vm.Runner, t *target.Target, opts Options) *Result {
 			quiescent := func() bool {
 				out, _ := r.Run(fmt.Sprintf("systemctl is-active %s", t.Unit))
 				switch strings.TrimSpace(out) {
-				case "inactive", "failed", "":
-					return true // dead (or unknown on a stubbed env)
+				case "inactive", "failed":
+					return true // EXPLICITLY stopped
 				default:
-					return false // active/activating/deactivating/reloading → still live
+					// active/activating/deactivating/reloading — or an EMPTY/unknown
+					// answer when the status cannot be queried at all. `is-active`
+					// exits non-zero for a stopped unit, so the exit code is not a
+					// usable signal; only explicit "inactive"/"failed" output proves
+					// the unit is dead. Treating empty as stopped was fail-open — a
+					// failed query around a live process would tear down its
+					// confinement (review finding). Cannot prove dead → not quiescent.
+					return false
 				}
 			}
 			if !quiescent() {

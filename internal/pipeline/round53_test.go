@@ -36,3 +36,19 @@ func TestCleanupRemovesModuleWhenUnitIsStopped(t *testing.T) {
 		t.Error("a stopped unit must still have its module removed on failure cleanup")
 	}
 }
+
+// If `systemctl is-active` cannot be queried (empty/unknown output), cleanup
+// must NOT assume the unit stopped: an unverifiable status around a possibly-live
+// process means confinement must be PRESERVED, not torn down. Only explicit
+// inactive/failed proves quiescence. (review finding — round 54)
+func TestCleanupPreservesModuleWhenStatusUnqueryable(t *testing.T) {
+	f := passingRunner()
+	f.responses["is-active widget.service"] = "" // status cannot be determined
+	res := Run(f, testTarget(), Options{MaxRounds: 2})
+	if res.FailureReason == "" {
+		t.Fatal("an unstoppable/unqueryable unit must fail the run")
+	}
+	if f.countCalls("semodule -r widget") != 0 {
+		t.Error("cleanup must PRESERVE the module when quiescence cannot be proven (no semodule -r)")
+	}
+}
