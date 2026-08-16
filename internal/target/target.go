@@ -4,6 +4,7 @@ package target
 import (
 	"fmt"
 	"os"
+	"strings"
 
 	"gopkg.in/yaml.v3"
 
@@ -42,6 +43,38 @@ type Target struct {
 	// Baseline is the path to the committed privilege baseline (first party).
 	// Defaults to baselines/<name>.yaml relative to the manifest.
 	Baseline string `yaml:"baseline,omitempty"`
+}
+
+// literalRoot returns the literal path prefix of a file-context regex — the
+// part before the first regex metacharacter — which is the tree `restorecon -RF`
+// would actually walk.
+func literalRoot(expr string) string {
+	for i, r := range expr {
+		if strings.ContainsRune(`(.*+?[]{}^$|\`, r) {
+			return strings.TrimRight(expr[:i], "/")
+		}
+	}
+	return strings.TrimRight(expr, "/")
+}
+
+// broadSystemRoots are shared trees a manifest must never claim wholesale — a
+// relabel of any of them would rewrite unrelated system files.
+var broadSystemRoots = map[string]bool{
+	"": true, "/usr": true, "/etc": true, "/var": true, "/bin": true,
+	"/sbin": true, "/opt": true, "/lib": true, "/lib64": true, "/run": true,
+	"/home": true, "/root": true, "/boot": true, "/dev": true, "/proc": true,
+	"/sys": true, "/tmp": true, "/srv": true, "/mnt": true, "/media": true,
+	"/usr/bin": true, "/usr/sbin": true, "/usr/lib": true, "/usr/lib64": true,
+	"/usr/local": true, "/usr/share": true, "/usr/libexec": true,
+	"/usr/local/bin": true, "/usr/local/sbin": true, "/usr/local/lib": true,
+	"/var/lib": true, "/var/log": true, "/var/run": true, "/var/cache": true,
+	"/var/tmp": true, "/etc/systemd": true, "/usr/lib/systemd": true,
+}
+
+// isBroadSystemRoot reports whether root is a shared system tree (or "/").
+func isBroadSystemRoot(root string) bool {
+	root = strings.TrimRight(root, "/")
+	return root == "" || broadSystemRoots[root]
 }
 
 // Load reads and validates a target manifest.
@@ -86,6 +119,15 @@ func Load(path string) (*Target, error) {
 		}
 		if !policy.KnownKind(pa.Kind) {
 			return nil, fmt.Errorf("%s: paths[%d] (%s): unknown kind %q — must be one of exec, conf, var_lib, log, runtime, content, tmp, cache, unit", path, i, pa.Path, pa.Kind)
+		}
+		// A path claim must be a BOUNDED, app-specific tree. GenerateFC emits it
+		// as a file-context regex and %post runs `restorecon -RF` on its root, so
+		// a broad claim like /usr(/.*)? or /(/.*)? would relabel large parts of
+		// the customer filesystem — and exact collision detection does not catch
+		// overlapping base-policy patterns (review finding). Reject any claim
+		// whose literal root is a bare system directory.
+		if root := literalRoot(pa.Path); isBroadSystemRoot(root) {
+			return nil, fmt.Errorf("%s: paths[%d] (%s): root %q is a broad system tree; declare a bounded, app-specific path", path, i, pa.Path, root)
 		}
 	}
 	// Port proto/number are interpolated into root %post/%postun `semanage port`

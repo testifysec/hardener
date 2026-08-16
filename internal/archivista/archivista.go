@@ -37,5 +37,12 @@ func Upload(baseURL string, env *signing.Envelope) (string, error) {
 	if err := json.NewDecoder(resp.Body).Decode(&out); err != nil {
 		return "", fmt.Errorf("archivista upload: decode response: %w", err)
 	}
+	// A 200 with an empty gitoid is NOT a successful store — Archivista returns
+	// the object's gitoid on success, so an empty one means the evidence was not
+	// persisted. Reporting it as stored would falsely claim the attestation is
+	// retrievable (review finding).
+	if strings.TrimSpace(out.Gitoid) == "" {
+		return "", fmt.Errorf("archivista upload: %s returned 200 with no gitoid — evidence was not stored", url)
+	}
 	return out.Gitoid, nil
 }

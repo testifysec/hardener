@@ -33,5 +33,12 @@ exercise: |
     sleep 0.5
   done
   [ "$ok" = "1" ]
-  curl -s --data-binary 'hardener_metric{src="test"} 42' http://127.0.0.1:8428/api/v1/import/prometheus
-  curl -sf 'http://127.0.0.1:8428/api/v1/export?match=hardener_metric' > /dev/null
+  curl -sf --data-binary 'hardener_metric{src="test"} 42' http://127.0.0.1:8428/api/v1/import/prometheus
+  # /api/v1/export requires match[] (match= returns an error); confirm the metric
+  # actually round-trips rather than accepting any 200.
+  found=0
+  for i in $(seq 1 10); do
+    if curl -fsSG --data-urlencode 'match[]=hardener_metric' http://127.0.0.1:8428/api/v1/export | grep -q hardener_metric; then found=1; break; fi
+    sleep 1
+  done
+  [ "$found" = "1" ]

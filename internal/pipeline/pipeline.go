@@ -637,8 +637,13 @@ func isAppOwnedExecutable(p *profile.Profile, path string) bool {
 		return false
 	}
 	// Positive ties, strongest first:
-	// 1. already a declared executable.
-	if slices.Contains(p.Executables, path) {
+	// 1. a declared executable — BUT declaration alone does NOT establish
+	//    ownership for a SHARED system bin directory. Relabeling /usr/bin/curl
+	//    (merely because a manifest listed it) as the app exec type would route
+	//    every unrelated launch of curl into the app domain (review finding).
+	//    In those dirs, ownership must be earned by an app-name tie below; a
+	//    declared path in a vendor/app dir is still trusted.
+	if slices.Contains(p.Executables, path) && !inSharedBinDir(path) {
 		return true
 	}
 	// 2. under a filesystem tree the profile itself claims.
@@ -670,6 +675,16 @@ func isAppOwnedExecutable(p *profile.Profile, path string) bool {
 		if seg != "" && matches(seg) {
 			return true
 		}
+	}
+	return false
+}
+
+// inSharedBinDir reports whether path sits directly in a shared system binary
+// directory, where a mere declaration must not confer app ownership.
+func inSharedBinDir(path string) bool {
+	switch filepath.Dir(path) {
+	case "/usr/bin", "/bin", "/usr/sbin", "/sbin", "/usr/local/bin", "/usr/local/sbin":
+		return true
 	}
 	return false
 }
