@@ -241,15 +241,37 @@ func GenerateSpec(p *profile.Profile, revision string) string {
 	// the substitution is empty, the loop skips, and stale <app>_port_t mappings
 	// (undeclared bind privilege) survive the upgrade (review finding). semanage
 	// always lists many rows, so empty output is itself an enumeration failure.
+	// Reconciliation may only delete a mapping we can PROVE was ours. Pruning every
+	// <app>_port_t row assumed the previous package owned the type — but a PORTLESS
+	// profile never declares <app>_port_t at all, so a foreign module can
+	// legitimately own it. On upgrade the fresh-install ownership check is skipped,
+	// so unconditional pruning silently deleted that foreign module's mappings, and
+	// a successful upgrade sets _ok=1 so rollback never restored them (review
+	// finding — round 76). Each build therefore ships its declared proto:port set as
+	// <app>.ports; %pre stashes it to .oldports on upgrade (same mechanism as
+	// .roots), and a row is pruned only when it appears there. A row we cannot prove
+	// was ours is LEFT ALONE with a warning — never deleted. (If it genuinely
+	// conflicts, semodule -i fails loudly, which is far better than destroying
+	// unrelated policy.)
 	reconcile := fmt.Sprintf(
 		"_portlist=\"$(semanage port -l 2>/dev/null)\" || { echo \"ERROR: 'semanage port -l' failed during %[1]s port reconciliation; refusing to risk leaving an undeclared bind privilege\" >&2; exit 1; }\n"+
 			"if [ -z \"$_portlist\" ]; then echo \"ERROR: 'semanage port -l' returned no output during %[1]s reconciliation; refusing to proceed\" >&2; exit 1; fi\n"+
+			"_oldports=\" \"\n"+
+			"if [ -f %%{_datadir}/selinux/hardener/%[3]s.oldports ]; then _oldports=\" $(tr '\\n' ' ' < %%{_datadir}/selinux/hardener/%[3]s.oldports) \"; fi\n"+
 			"for _row in $(printf '%%s\\n' \"$_portlist\" | awk '$1==\"%[1]s\"{for(i=3;i<=NF;i++){gsub(\",\",\"\",$i); print $2\":\"$i}}'); do "+
-			"case \"%[2]s\" in *\" $_row \"*) : ;; "+
-			"*) _pp=${_row%%%%:*}; _pn=${_row##*:}; "+
+			"case \"%[2]s\" in *\" $_row \"*) continue ;; esac; "+
+			"case \"$_oldports\" in *\" $_row \"*) : ;; "+
+			"*) echo \"warning: port mapping $_row under %[1]s was not declared by the previous %[3]s package; leaving it alone rather than deleting a mapping that may belong to another module\" >&2; continue ;; esac; "+
+			"_pp=${_row%%%%:*}; _pn=${_row##*:}; "+
 			"if semanage port -d -p \"$_pp\" \"$_pn\" 2>/dev/null; then _pruned=\"$_pruned $_row\"; "+
-			"else echo \"ERROR: could not prune stale port $_row from %[1]s — refusing to leave an undeclared bind privilege\" >&2; exit 1; fi ;; esac; done\n",
-		appPortType, desired)
+			"else echo \"ERROR: could not prune stale port $_row from %[1]s — refusing to leave an undeclared bind privilege\" >&2; exit 1; fi; done\n",
+		appPortType, desired, app)
+	// portsContent is this build's declared proto:port set, shipped as <app>.ports
+	// so the NEXT upgrade can tell our mappings from a foreign module's.
+	var portsContent strings.Builder
+	for _, port := range p.Ports {
+		fmt.Fprintf(&portsContent, "%s:%d\n", port.Proto, port.Port)
+	}
 
 	var ports strings.Builder
 	var portsDel strings.Builder
@@ -345,6 +367,8 @@ install -D -m 0644 %%{SOURCE1} %%{buildroot}%%{_datadir}/selinux/hardener/%[1]s.
 mkdir -p %%{buildroot}%%{_datadir}/selinux/hardener
 cat > %%{buildroot}%%{_datadir}/selinux/hardener/%[1]s.roots <<'HARDENER_ROOTS'
 %[9]sHARDENER_ROOTS
+cat > %%{buildroot}%%{_datadir}/selinux/hardener/%[1]s.ports <<'HARDENER_PORTS'
+%[12]sHARDENER_PORTS
 
 %%pre
 # ABORTABLE PREFLIGHT (fresh install). These checks also run in %%post, but a
@@ -388,6 +412,17 @@ if [ "$1" -ge 2 ] && [ -f %%{_datadir}/selinux/hardener/%[1]s.roots ]; then
     # above skips this and there is nothing to reconcile.)
     if ! cp %%{_datadir}/selinux/hardener/%[1]s.roots %%{_datadir}/selinux/hardener/%[1]s.oldroots; then
         echo "ERROR: could not stash the current file-context roots for upgrade reconciliation; refusing a non-atomic upgrade" >&2
+        exit 1
+    fi
+fi
+# Same for the declared PORT set: reconciliation may only delete a mapping the
+# PREVIOUS package declared, so stash its inventory before the new payload
+# overwrites it. A pre-.ports old version has no file — reconciliation then prunes
+# nothing rather than risk deleting a foreign module's mappings (review finding).
+if [ "$1" -ge 2 ] && [ -f %%{_datadir}/selinux/hardener/%[1]s.ports ]; then
+    rm -f %%{_datadir}/selinux/hardener/%[1]s.oldports
+    if ! cp %%{_datadir}/selinux/hardener/%[1]s.ports %%{_datadir}/selinux/hardener/%[1]s.oldports; then
+        echo "ERROR: could not stash the current declared ports for upgrade reconciliation; refusing a non-atomic upgrade" >&2
         exit 1
     fi
 fi
@@ -578,6 +613,7 @@ if [ "$_op" != 1 ] && [ -f %%{_datadir}/selinux/hardener/%[1]s.oldroots ]; then
 fi
 _ok=1
 rm -f %%{_datadir}/selinux/hardener/%[1]s.oldroots
+rm -f %%{_datadir}/selinux/hardener/%[1]s.oldports
 # The %%pre snapshot has served its purpose once the upgrade succeeded. Removed
 # only on SUCCESS: the rollback path restores from it, and leaving it after a
 # failure keeps manual recovery possible.
@@ -608,5 +644,6 @@ fi
 %%{_datadir}/selinux/packages/%[1]s.pp
 %%{_datadir}/selinux/hardener/%[1]s.fc
 %%{_datadir}/selinux/hardener/%[1]s.roots
-`, app, relabel.String(), ports.String(), portsDel.String(), revision, restore.String(), appPortType, reconcile, rootsContent.String(), preflight.String(), restoreStrict.String())
+%%{_datadir}/selinux/hardener/%[1]s.ports
+`, app, relabel.String(), ports.String(), portsDel.String(), revision, restore.String(), appPortType, reconcile, rootsContent.String(), preflight.String(), restoreStrict.String(), portsContent.String())
 }

@@ -123,6 +123,7 @@ func TestStatementIsDeterministic(t *testing.T) {
 		"/usr/sbin/d": goodSHA, "/usr/sbin/e": goodSHA,
 	}
 	r.EntrypointPaths = []string{"/usr/sbin/a", "/usr/sbin/b", "/usr/sbin/c", "/usr/sbin/d", "/usr/sbin/e"}
+	r.ObservedEntrypoints = []string{"/usr/sbin/a"} // MainPID binary; must be in the bound set
 	var first []byte
 	for i := 0; i < 20; i++ {
 		st, err := BuildOrErr(r, Env{Mode: "Enforcing"}, nil)
@@ -240,6 +241,7 @@ func TestVerdictRejectsUnrelatedExtraWithoutArtifact(t *testing.T) {
 	// With entrypoint bytes present, the same build succeeds.
 	r.EntrypointDigests = map[string]string{"/opt/widget/bin/widgetd": goodSHA}
 	r.EntrypointPaths = []string{"/opt/widget/bin/widgetd"}
+	r.ObservedEntrypoints = []string{"/opt/widget/bin/widgetd"}
 	if _, err := BuildOrErr(r, Env{}, nil); err != nil {
 		t.Errorf("exercised entrypoint bytes must satisfy the artifact requirement: %v", err)
 	}

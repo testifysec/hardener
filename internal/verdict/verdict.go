@@ -303,6 +303,24 @@ func BuildOrErr(res *pipeline.Result, env Env, extra []Subject) (Statement, erro
 				return Statement{}, fmt.Errorf("passing verdict binds an entrypoint digest for %q, which is not in the resolved entrypoint set — refusing to attest an unrelated path", k)
 			}
 		}
+		// The OBSERVED set (round 72) must be validated too, not merely reported.
+		// Unvalidated, a pass could carry an EMPTY observed set — certifying bytes
+		// that were never seen executing under enforcement — or an observed path
+		// outside the bound digest set, i.e. evidence about something the statement
+		// does not bind (review finding — round 76). A passing verdict means the
+		// workload ran confined, so at least one entrypoint must have been observed,
+		// and every observed path must be one we resolved AND bound.
+		if len(res.ObservedEntrypoints) == 0 {
+			return Statement{}, fmt.Errorf("passing verdict observed no entrypoint executing in the app domain under enforcement — the evidence would certify bytes that were never exercised; refusing")
+		}
+		for _, o := range res.ObservedEntrypoints {
+			if !expected[o] {
+				return Statement{}, fmt.Errorf("passing verdict reports observed entrypoint %q, which is not in the resolved entrypoint set — refusing to attest an unbound path", o)
+			}
+			if res.EntrypointDigests[o] == "" {
+				return Statement{}, fmt.Errorf("passing verdict reports observed entrypoint %q with no bound digest — refusing", o)
+			}
+		}
 		// Whenever an RPM was actually produced, it MUST be among the subjects.
 		// The distributed package (compiled policy + %post scriptlets) is what
 		// gets installed; a passing attestation that binds only the entrypoint
