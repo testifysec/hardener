@@ -52,10 +52,11 @@ exercise: |
   done
   [ "$ok" = "1" ]
   grep -q machineIdentifier /tmp/plex.out
-  # Exercise the transcoder helper so its execve + runtime denials surface during
-  # observation. Plex normally fork/execs it per transcode, but that needs media +
-  # an auth token; invoking it directly still drives the plex_exec_t transition and
-  # the binary's own file/lib accesses under enforcement. It links Plex's bundled
-  # libs, so point the loader there; the patched ffmpeg prints its banner and exits 0.
-  sudo -u plex env LD_LIBRARY_PATH=/usr/lib/plexmediaserver/lib "/usr/lib/plexmediaserver/Plex Transcoder" -version > /tmp/plex.xcode 2>&1
-  grep -qi 'ffmpeg\|plex transcoder' /tmp/plex.xcode
+  # Plex Media Server fork/execs the transcoder (in plex_t, via the unit's domain
+  # transition) for every transcode. Driving a real transcode needs media + an auth
+  # token, and running the helper directly under `sudo -u plex` would only change
+  # the Unix user, NOT enter plex_t — it would run unconfined and surface no plex_t
+  # denials, a false confinement claim (review finding — round 66). Assert the
+  # checkable prerequisite instead: under enforcement the transcoder binary carries
+  # plex_exec_t, so when Plex execs it the init/plex transition into plex_t fires.
+  test "$(stat -c %C "/usr/lib/plexmediaserver/Plex Transcoder" | cut -d: -f3)" = plex_exec_t
