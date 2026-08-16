@@ -43,8 +43,12 @@ exercise: |
   done
   [ "$ok" = "1" ]
   before=$(sudo stat -c %s /opt/splunkforwarder/var/log/splunk/splunkd.log)
-  sleep 5
+  sleep 8
   systemctl is-active --quiet SplunkForwarder
   after=$(sudo stat -c %s /opt/splunkforwarder/var/log/splunk/splunkd.log)
-  [ "$after" -ge "$before" ]
+  # Require the log to actually GROW, not merely stay the same: splunkd writes
+  # periodic entries continuously, so `-ge` (which passes on an UNCHANGED size)
+  # would let the exercise pass even when confinement BLOCKS log writes, hiding a
+  # missing grant. `-gt` proves the policy allowed splunkd to write its own log.
+  [ "$after" -gt "$before" ]
   sudo -u splunkfwd /opt/splunkforwarder/bin/splunk status --accept-license 2>/dev/null | grep -q "splunkd is running"

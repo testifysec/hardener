@@ -189,6 +189,17 @@ func GenerateSpec(p *profile.Profile, revision string) string {
 
 	var ports strings.Builder
 	var portsDel strings.Builder
+	// %postun deletes our port mappings BEFORE `semodule -r`. Capture and VALIDATE
+	// the listing ONCE up front: piping an unvalidated `semanage port -l` into
+	// awk|grep is fail-OPEN — an enumeration failure reads as "mapping absent", the
+	// deletion is skipped, and semodule -r then fails on the still-referenced type
+	// while RPM removal "succeeds", leaving the module and a stale bind privilege
+	// installed (review finding). semanage always lists many rows, so empty is a
+	// failure; fail the uninstall if cleanup cannot be confirmed.
+	if len(p.Ports) > 0 {
+		fmt.Fprintf(&portsDel, "_pl=\"$(semanage port -l 2>/dev/null)\"\n")
+		fmt.Fprintf(&portsDel, "if [ -z \"$_pl\" ]; then echo \"ERROR: cannot enumerate SELinux ports during %[1]s uninstall; refusing to leave a stale bind privilege — clean up manually\" >&2; exit 1; fi\n", appPortType)
+	}
 	for _, port := range p.Ports {
 		// Add + verify, RECORDING only the ports we actually added (_added), so
 		// rollback removes exactly this transaction's additions and never a
@@ -203,7 +214,7 @@ func GenerateSpec(p *profile.Profile, revision string) string {
 		// `semanage port -d` rejects -t; delete by proto/port only, but ONLY after
 		// confirming the mapping still belongs to OUR type — so uninstall never
 		// removes a proto/port another service later claimed (review finding).
-		fmt.Fprintf(&portsDel, "if semanage port -l 2>/dev/null | awk -v t=%[1]s -v p=%[2]s '$1==t && $2==p' | grep -qw %[3]d; then semanage port -d -p %[2]s %[3]d 2>/dev/null || echo \"warning: could not remove port %[3]d/%[2]s mapping for %[1]s\" >&2; fi\n",
+		fmt.Fprintf(&portsDel, "if printf '%%s\\n' \"$_pl\" | awk -v t=%[1]s -v p=%[2]s '$1==t && $2==p' | grep -qw %[3]d; then semanage port -d -p %[2]s %[3]d 2>/dev/null || { echo \"ERROR: could not remove port %[3]d/%[2]s mapping for %[1]s during uninstall — refusing to leave a stale bind privilege\" >&2; exit 1; }; fi\n",
 			appPortType, port.Proto, port.Port)
 	}
 	// After the module is removed on uninstall, the app's files still carry the
@@ -427,7 +438,14 @@ rm -f %%{_datadir}/selinux/hardener/%[1]s.oldroots
 
 %%postun
 if [ $1 -eq 0 ]; then
-%[4]s    semodule -r %[1]s 2>/dev/null || echo "warning: could not remove the %[1]s policy module" >&2
+%[4]s    semodule -r %[1]s 2>/dev/null || :
+    # VERIFY removal (idempotent: a re-uninstall of an already-absent module is
+    # fine). Capture the list and fail closed if it cannot be read or our module
+    # is still present — otherwise RPM removal "succeeds" while the module stays
+    # installed (review finding).
+    _mlu="$(semodule -l 2>/dev/null)"
+    if [ -z "$_mlu" ]; then echo "ERROR: cannot verify %[1]s module removal during uninstall (semodule -l failed)" >&2; exit 1; fi
+    if printf '%%s\n' "$_mlu" | grep -qE "^%[1]s([[:space:]]|$)"; then echo "ERROR: the %[1]s policy module is still installed after uninstall; remove it manually: sudo semodule -r %[1]s" >&2; exit 1; fi
     # Restore base file labels now that the app types are undefined, or the
     # files would be left with a dangling label and become inaccessible.
 %[6]s
