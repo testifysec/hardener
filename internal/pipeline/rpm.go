@@ -473,9 +473,14 @@ _rollback() {
         # grep is fail-OPEN — if the enumeration fails, grep finds no match and we
         # would treat an UNVERIFIABLE rejected module as removed (review finding).
         # semodule -l always lists many base modules, so empty output is a failure.
+        # Testing emptiness ALONE is still fail-open: a semodule that fails partway
+        # can exit nonzero having already printed some modules, and that partial list
+        # will not contain ours — which reads as "removed" (review finding — round
+        # 74). Capture the EXIT STATUS as well and treat any nonzero as unverifiable.
         semodule -r %[1]s 2>/dev/null || :
-        _ml="$(semodule -l 2>/dev/null)"
-        if [ -z "$_ml" ]; then
+        _mlrc=0
+        _ml="$(semodule -l 2>/dev/null)" || _mlrc=$?
+        if [ "$_mlrc" != 0 ] || [ -z "$_ml" ]; then
             echo "CRITICAL: cannot verify removal of the rejected %[1]s policy module (semodule -l failed); it may still be loaded and confining the app under UNVERIFIED policy. Remove it manually: sudo semodule -r %[1]s" >&2
         elif printf '%%s\n' "$_ml" | grep -qE "^%[1]s([[:space:]]|$)"; then
             echo "CRITICAL: the rejected %[1]s policy module is still loaded after rollback; the application may be confined by UNVERIFIED policy. Remove it manually: sudo semodule -r %[1]s" >&2
@@ -565,9 +570,14 @@ if [ $1 -eq 0 ]; then
     # VERIFY removal (idempotent: a re-uninstall of an already-absent module is
     # fine). Capture the list and fail closed if it cannot be read or our module
     # is still present — otherwise RPM removal "succeeds" while the module stays
-    # installed (review finding).
-    _mlu="$(semodule -l 2>/dev/null)"
-    if [ -z "$_mlu" ]; then echo "ERROR: cannot verify %[1]s module removal during uninstall (semodule -l failed)" >&2; exit 1; fi
+    # installed (review finding). Emptiness alone is not enough: a semodule that
+    # fails partway can exit nonzero having already printed some modules, and that
+    # partial list will not contain ours — which reads as "removed" and lets the
+    # uninstall restore base labels while the module is still loaded (review finding
+    # — round 74). Capture the EXIT STATUS too and fail on any nonzero.
+    _mlurc=0
+    _mlu="$(semodule -l 2>/dev/null)" || _mlurc=$?
+    if [ "$_mlurc" != 0 ] || [ -z "$_mlu" ]; then echo "ERROR: cannot verify %[1]s module removal during uninstall (semodule -l failed or returned nothing)" >&2; exit 1; fi
     if printf '%%s\n' "$_mlu" | grep -qE "^%[1]s([[:space:]]|$)"; then echo "ERROR: the %[1]s policy module is still installed after uninstall; remove it manually: sudo semodule -r %[1]s" >&2; exit 1; fi
     # Restore base file labels now that the app types are undefined, or the
     # files would be left with a dangling label and become inaccessible.
