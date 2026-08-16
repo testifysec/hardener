@@ -571,7 +571,11 @@ func Run(r vm.Runner, t *target.Target, opts Options) *Result {
 		if err := installPolicy(r, p, te, fc); err != nil {
 			return fail(fmt.Sprintf("policy-install round %d", round), err)
 		}
-		expectedModuleDigest = moduleContentDigest(r, appMod)
+		dg, dErr := moduleContentDigest(r, appMod)
+		if dErr != nil {
+			return fail(fmt.Sprintf("module-content-baseline round %d", round), dErr)
+		}
+		expectedModuleDigest = dg
 		res.FinalTE, res.FinalFC = te, fc
 
 		opts.Log("[%s] observe round %d (permissive domain)", t.Name, round)
@@ -651,7 +655,11 @@ func Run(r vm.Runner, t *target.Target, opts Options) *Result {
 	if err := installPolicy(r, p, finalTE, finalFC); err != nil {
 		return fail("final-policy-install", err)
 	}
-	expectedModuleDigest = moduleContentDigest(r, appMod)
+	if dg, dErr := moduleContentDigest(r, appMod); dErr != nil {
+		return fail("module-content-baseline (final)", dErr)
+	} else {
+		expectedModuleDigest = dg
+	}
 	res.FinalTE, res.FinalFC = finalTE, finalFC
 
 	// The verifier itself must still be trustworthy after running the
@@ -695,7 +703,11 @@ func Run(r vm.Runner, t *target.Target, opts Options) *Result {
 		// exercise still evades a point-in-time check — that residual is the
 		// deferred privilege-dropped-exercise decision.
 		if expectedModuleDigest != "" {
-			if got := moduleContentDigest(r, appMod); got != expectedModuleDigest {
+			got, derr := moduleContentDigest(r, appMod)
+			if derr != nil {
+				return fmt.Errorf("verifier integrity lost %s: cannot re-fingerprint the %s module content: %w", when, appMod, derr)
+			}
+			if got != expectedModuleDigest {
 				return fmt.Errorf("verifier integrity lost %s: the loaded %s module content changed since install (%s→%s) — a same-name module replacement; the enforced policy no longer matches FinalTE; refusing", when, appMod, expectedModuleDigest, got)
 			}
 		}
@@ -772,7 +784,11 @@ func Run(r vm.Runner, t *target.Target, opts Options) *Result {
 		if err := installPolicy(r, p, te, fc); err != nil {
 			return fail("policy-install (enforce refinement)", err)
 		}
-		expectedModuleDigest = moduleContentDigest(r, appMod)
+		if dg, dErr := moduleContentDigest(r, appMod); dErr != nil {
+			return fail("module-content-baseline (enforce refinement)", dErr)
+		} else {
+			expectedModuleDigest = dg
+		}
 		res.FinalTE, res.FinalFC = te, fc
 	}
 
@@ -1473,19 +1489,29 @@ func moduleNameSet(r vm.Runner) (map[string]bool, error) {
 // concatenated in sorted order. A same-name module REPLACEMENT (a broader policy
 // installed under the app's own name) changes these bytes while leaving the
 // module NAME set unchanged, so comparing this digest across the observation
-// window catches a swap that moduleNameSet cannot. Returns "" when the store is
-// unreadable or the module is absent (e.g. a stubbed test env) — the caller only
-// enforces the check when it holds a non-empty baseline.
-func moduleContentDigest(r vm.Runner, appMod string) string {
-	out, err := r.Run(fmt.Sprintf(`sudo sh -c "find /var/lib/selinux/*/active/modules/*/%s -type f -print0 2>/dev/null | sort -z | xargs -0 cat 2>/dev/null | sha256sum"`, appMod))
+// window catches a swap that moduleNameSet cannot.
+//
+// FAIL CLOSED: `set -o pipefail` so a find/cat failure is not masked by
+// sha256sum's success, and REQUIRE at least one module file. Without this, a
+// missing/unreadable module hashed the EMPTY input to a well-known constant
+// digest — and if that happened when capturing the BASELINE, a later same-name
+// replacement (also empty for whatever reason) would match the meaningless
+// baseline and pass. An error here means the module cannot be fingerprinted; the
+// caller (post-install and recheck) treats that as fatal (review finding).
+func moduleContentDigest(r vm.Runner, appMod string) (string, error) {
+	out, err := r.Run(fmt.Sprintf(`sudo bash -c 'set -o pipefail; files=$(find /var/lib/selinux/*/active/modules/*/%s -type f 2>/dev/null | sort); [ -n "$files" ] || { echo NO_MODULE_FILES; exit 3; }; printf "%%s\n" "$files" | xargs cat | sha256sum'`, appMod))
+	trimmed := strings.TrimSpace(out)
 	if err != nil {
-		return ""
+		return "", fmt.Errorf("fingerprinting loaded %s module content: %w (output=%q)", appMod, err, trimmed)
 	}
-	f := strings.Fields(strings.TrimSpace(out))
-	if len(f) == 0 {
-		return ""
+	if strings.Contains(out, "NO_MODULE_FILES") {
+		return "", fmt.Errorf("no policy-store files found for module %s — cannot fingerprint the loaded module (empty input must NOT hash to a passing digest)", appMod)
 	}
-	return f[0]
+	f := strings.Fields(trimmed)
+	if len(f) == 0 || len(f[0]) != 64 {
+		return "", fmt.Errorf("could not compute a valid sha256 for module %s content (output=%q)", appMod, trimmed)
+	}
+	return f[0], nil
 }
 
 func auditStatus(r vm.Runner) (enabled, lost, backlog int, ok bool) {
