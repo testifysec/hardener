@@ -110,3 +110,23 @@ func TestMerge(t *testing.T) {
 		}
 	}
 }
+
+// Round 15: auditd with name_format set prefixes every record with
+// `node=<hostname> `. The parser must still recognize these — an anchored
+// `^type=` pre-filter in the pipeline used to drop them, making real AVCs on
+// such hosts vanish (review finding). ParseLine/ParseLogWithPaths match by
+// substring, so the prefix must not defeat them.
+func TestParseNodePrefixedRecords(t *testing.T) {
+	line := `node=web01.corp type=AVC msg=audit(1723640000.1:99): avc:  denied  { read } for  pid=7 comm="widgetd" scontext=system_u:system_r:widget_t:s0 tcontext=system_u:object_r:shadow_t:s0 tclass=file permissive=0`
+	d, err := ParseLine(line)
+	if err != nil {
+		t.Fatalf("node=-prefixed AVC must parse: %v", err)
+	}
+	if d.SourceType != "widget_t" || d.TargetType != "shadow_t" {
+		t.Errorf("wrong denial parsed: %+v", d)
+	}
+	ds := ParseLogWithPaths(line + "\n")
+	if len(ds) != 1 || ds[0].TargetType != "shadow_t" {
+		t.Errorf("ParseLogWithPaths must return the node=-prefixed denial, got %+v", ds)
+	}
+}

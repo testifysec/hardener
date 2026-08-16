@@ -24,7 +24,8 @@ func TestBuildRejectsMalformedDigest(t *testing.T) {
 // A run that produced a policy RPM must carry it as a subject with a valid digest.
 func TestBuildRequiresAValidSubject(t *testing.T) {
 	r := passingResult()
-	st, err := BuildOrErr(r, Env{}, []Subject{{Name: "app-selinux.rpm", SHA256: goodSHA}})
+	// The RPM subject name must match the produced RPM (res.RPMPath basename).
+	st, err := BuildOrErr(r, Env{}, []Subject{{Name: "widget-selinux-1.0.0-1.el9.noarch.rpm", SHA256: goodSHA}})
 	if err != nil {
 		t.Fatalf("valid digest must be accepted: %v", err)
 	}
@@ -41,10 +42,30 @@ func TestBuildRequiresAValidSubject(t *testing.T) {
 	}
 }
 
+// Round 15: a passing run that produced an RPM MUST bind it as a subject. The
+// distributed package (compiled policy + scriptlets) is what gets installed;
+// entrypoint digests do not substitute for the RPM subject.
+func TestPassingVerdictRequiresRPMSubjectWhenRPMProduced(t *testing.T) {
+	r := passingResult()
+	r.RPMPath = "/home/u/rpmbuild/RPMS/noarch/widget-selinux-1.0.0-1.el9.noarch.rpm"
+	if _, err := BuildOrErr(r, Env{}, nil); err == nil {
+		t.Fatal("an RPM-producing pass must bind the RPM subject, even with entrypoint digests")
+	}
+	// The matching RPM subject satisfies it.
+	if _, err := BuildOrErr(r, Env{}, []Subject{{Name: "widget-selinux-1.0.0-1.el9.noarch.rpm", SHA256: goodSHA}}); err != nil {
+		t.Fatalf("binding the produced RPM must succeed: %v", err)
+	}
+	// A differently-named RPM subject does not satisfy the requirement.
+	if _, err := BuildOrErr(r, Env{}, []Subject{{Name: "some-other.rpm", SHA256: goodSHA}}); err == nil {
+		t.Fatal("a non-matching RPM subject must not satisfy the RPM-binding requirement")
+	}
+}
+
 // Entrypoint digests supplied by the pipeline become subjects, binding the
 // verdict to the exact exercised bytes, not just the generated policy.
 func TestBuildBindsEntrypointDigests(t *testing.T) {
 	r := passingResult()
+	r.RPMPath = "" // isolate entrypoint-byte binding (no RPM claimed)
 	r.EntrypointDigests = map[string]string{"/usr/sbin/widgetd": goodSHA}
 	st, err := BuildOrErr(r, Env{}, nil)
 	if err != nil {
@@ -83,6 +104,7 @@ func TestPassingVerdictRequiresArtifactSubject(t *testing.T) {
 // DSSE signature (review finding).
 func TestStatementIsDeterministic(t *testing.T) {
 	r := passingResult()
+	r.RPMPath = "" // determinism of entrypoint-subject ordering; no RPM claimed
 	r.EntrypointDigests = map[string]string{
 		"/usr/sbin/a": goodSHA, "/usr/sbin/b": goodSHA, "/usr/sbin/c": goodSHA,
 		"/usr/sbin/d": goodSHA, "/usr/sbin/e": goodSHA,
