@@ -26,7 +26,14 @@ func (c Collision) Render() string {
 // system file_contexts, matching on the exact path expression — that is the
 // key semodule treats as a duplicate.
 func FindCollisions(p *profile.Profile, baseFileContexts string) []Collision {
-	claimed := map[string]string{}
+	// A file_contexts entry is `regex [selector] context`. The SELECTOR (`--`
+	// regular file, `-d` dir, `-l` symlink, ...) is part of the identity: SELinux
+	// permits IDENTICAL regexes with DIFFERENT selectors, so keying only on the
+	// regex overwrote one entry with another — missing a real collision or
+	// reporting a false one depending on record order (review finding). Keep every
+	// (selector, type) per regex and compare selectors for overlap.
+	type baseEntry struct{ sel, typ string }
+	claimed := map[string][]baseEntry{}
 	for _, line := range strings.Split(baseFileContexts, "\n") {
 		line = strings.TrimSpace(line)
 		if line == "" || strings.HasPrefix(line, "#") {
@@ -36,36 +43,41 @@ func FindCollisions(p *profile.Profile, baseFileContexts string) []Collision {
 		if len(fields) < 2 {
 			continue
 		}
-		claimed[fields[0]] = contextType(fields[len(fields)-1])
+		sel := ""
+		if len(fields) >= 3 {
+			sel = fields[1] // -- / -d / -l / -c / -b / -s / -p
+		}
+		claimed[fields[0]] = append(claimed[fields[0]], baseEntry{sel: sel, typ: contextType(fields[len(fields)-1])})
 	}
+	// A selector-less entry (empty) matches EVERY file type, so it overlaps any
+	// selector; two DIFFERENT specific selectors (-- vs -d) never overlap.
+	selOverlap := func(a, b string) bool { return a == "" || b == "" || a == b }
 	var out []Collision
-	// matchKey is the fc path spec as GenerateFC emits it (that is what semodule
-	// dedups on and what appears in the base file_contexts). recordPath is the
-	// raw manifest path, kept for exclusion (GenerateFCExcluding filters on the
-	// raw p.Paths / p.Executables values).
-	check := func(matchKey, recordPath, want string) {
-		base, ok := claimed[matchKey]
-		if !ok || base == want {
-			// Not claimed, or a previous install of this same module.
-			// Re-declaring an identical spec is idempotent; treating it as a
-			// conflict would drop our own labels and quietly leave the
-			// application unconfined on re-runs.
+	// matchKey is the fc path spec as GenerateFC emits it (what semodule dedups on
+	// and what appears in the base file_contexts); ourSel is the selector our .fc
+	// uses for this claim; recordPath is the raw manifest path, kept for exclusion.
+	check := func(matchKey, ourSel, recordPath, want string) {
+		for _, e := range claimed[matchKey] {
+			if !selOverlap(e.sel, ourSel) || e.typ == want {
+				// Different file type (no overlap), or a previous install of this
+				// same module (idempotent — re-declaring our own type is not a
+				// conflict). Keep scanning; another overlapping entry may collide.
+				continue
+			}
+			out = append(out, Collision{Path: recordPath, BaseType: e.typ, WouldBeType: want})
 			return
 		}
-		out = append(out, Collision{Path: recordPath, BaseType: base, WouldBeType: want})
 	}
-	// GenerateFC emits path claims verbatim, so match on the raw path.
+	// GenerateFC emits PATH claims with NO selector (matches all file types), so
+	// they overlap any base selector; match on the raw path.
 	for _, pa := range p.Paths {
-		check(pa.Path, pa.Path, TypeForKind(p.Name, KindFromString(pa.Kind)))
+		check(pa.Path, "", pa.Path, TypeForKind(p.Name, KindFromString(pa.Kind)))
 	}
-	// GenerateFC emits an _exec_t line for every executable and ESCAPES it
-	// (escapeFCPath: spaces → \s, regex metacharacters quoted). The base claim
-	// to match is therefore the escaped form — comparing the raw path missed a
-	// collision like "Plex\sMedia\sServer", leaving a duplicate spec that makes
-	// semodule reject the module (review finding). Match on the escaped form,
-	// record the raw path for exclusion.
+	// GenerateFC emits each EXECUTABLE with the `--` selector and ESCAPES the path
+	// (escapeFCPath: spaces → \s, regex metacharacters quoted). Match on the
+	// escaped form with the `--` selector, record the raw path for exclusion.
 	for _, exe := range p.Executables {
-		check(escapeFCPath(exe), exe, TypeForKind(p.Name, KindExec))
+		check(escapeFCPath(exe), "--", exe, TypeForKind(p.Name, KindExec))
 	}
 	return out
 }

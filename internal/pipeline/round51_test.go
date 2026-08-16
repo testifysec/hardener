@@ -50,3 +50,26 @@ func TestSpecPostPreflightsForeignPortType(t *testing.T) {
 		}
 	}
 }
+
+// %post rollback must VERIFY module restoration, not suppress every failure with
+// `|| :`: a failed old-module restore on upgrade (or a rejected module left
+// loaded on fresh install) leaves the app under absent/unverified policy while
+// RPM only reports failure. The rollback must report those states loudly with a
+// manual remediation. (review finding — round 59)
+func TestSpecRollbackVerifiesModuleRestoration(t *testing.T) {
+	p := &profile.Profile{
+		Name:        "widget",
+		Executables: []string{"/opt/widget/bin/widgetd"},
+		Ports:       []profile.Port{{Proto: "tcp", Port: 8443}},
+	}
+	spec := GenerateSpec(p, "20260101000000")
+	for _, want := range []string{
+		"rejected widget policy module is still loaded after rollback",
+		"could not restore the previous widget policy module during rollback",
+		`grep -qE "^widget([[:space:]]|$)"`,
+	} {
+		if !strings.Contains(spec, want) {
+			t.Errorf("rollback must verify module restoration; missing %q", want)
+		}
+	}
+}
