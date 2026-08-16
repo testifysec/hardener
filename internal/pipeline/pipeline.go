@@ -3,6 +3,8 @@
 package pipeline
 
 import (
+	"crypto/rand"
+	"encoding/hex"
 	"fmt"
 	"path/filepath"
 	"slices"
@@ -1388,10 +1390,22 @@ func exercise(r vm.Runner, t *target.Target, dom string) ([]avc.Denial, bool, ru
 	// size-stabilization heuristic CANNOT guarantee this (auditd can dequeue an AVC
 	// and append it just after the size settles), so a previous fallback to it was
 	// removed: if the sentinel cannot be established we FAIL CLOSED rather than read a
-	// possibly-incomplete window (review finding). The sentinel text embeds the
-	// exercise's start inode+offset so it is unique per run.
+	// possibly-incomplete window (review finding).
+	//
+	// The token must be UNPREDICTABLE. It previously embedded the start inode and
+	// byte offset — both of which a root exercise can stat — and the window is cut
+	// at the FIRST occurrence, so the exercise could derive the token, write it into
+	// audit.log itself BEFORE doing denial-worthy work, and every later AVC (and
+	// every tampering record) would be parsed off the end of the window as "after
+	// the barrier" (review finding — round 71). A crypto/rand nonce cannot be
+	// derived, and it is generated here — AFTER the exercise has already run and the
+	// unit is stopped — so it has never been observable inside the guest.
 	barrierOK := false
-	sentinel := fmt.Sprintf("hardener-barrier-%s-%s", startInode, strings.TrimSpace(offset))
+	nonce, nerr := randomHex(16)
+	if nerr != nil {
+		return nil, exOK, run, fmt.Errorf("could not generate an audit write-barrier nonce: %w — refusing to bound the window with a predictable token", nerr)
+	}
+	sentinel := "hardener-barrier-" + nonce
 	if _, err := r.Run("sudo auditctl -m " + vm.ShellQuote(sentinel)); err == nil {
 		for i := 0; i < 10; i++ {
 			n, gerr := r.Run("sudo grep -Fc " + vm.ShellQuote(sentinel) + " /var/log/audit/audit.log 2>/dev/null || true")
@@ -1444,6 +1458,13 @@ func exercise(r vm.Runner, t *target.Target, dom string) ([]avc.Denial, bool, ru
 	idx := strings.Index(out, sentinel)
 	if idx < 0 {
 		return nil, exOK, run, fmt.Errorf("audit write-barrier sentinel not found in the read slice — the window may have rotated or truncated under our offset; re-run")
+	}
+	// Exactly ONE occurrence. The nonce is unguessable, so a second copy cannot be a
+	// coincidence — it means something in the guest replayed our boundary token, and
+	// cutting at the first occurrence would discard every record between the two.
+	// Fail closed rather than trust a window someone else can terminate.
+	if n := strings.Count(out, sentinel); n != 1 {
+		return nil, exOK, run, fmt.Errorf("audit write-barrier sentinel appears %d times in the read slice (want exactly 1) — the boundary token was replayed; refusing to trust a window that can be terminated early", n)
 	}
 	out = out[:idx]
 	// Re-stat inode AFTER the read: a rotation between the pre-tail stat and the
@@ -1610,6 +1631,18 @@ func auditEnabledReconfigured(window string) bool {
 		}
 	}
 	return false
+}
+
+// randomHex returns n cryptographically random bytes as a hex string. Used for
+// the audit write-barrier token: the boundary must not be derivable from state a
+// root exercise can read (inode, offsets, timestamps), or the exercise could emit
+// the boundary itself and hide every record after it.
+func randomHex(n int) (string, error) {
+	b := make([]byte, n)
+	if _, err := rand.Read(b); err != nil {
+		return "", err
+	}
+	return hex.EncodeToString(b), nil
 }
 
 // auditPolicyReloaded reports whether the audit window contains a kernel

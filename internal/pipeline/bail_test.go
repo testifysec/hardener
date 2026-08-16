@@ -20,6 +20,9 @@ type fakeRunner struct {
 	seqPos map[string]int
 	failOn []string
 	calls  []string
+	// duplicateBarrier makes the audit tail echo the write-barrier token TWICE,
+	// modeling a guest that replayed the boundary to truncate the window early.
+	duplicateBarrier bool
 }
 
 func (f *fakeRunner) Run(script string) (string, error) {
@@ -30,19 +33,20 @@ func (f *fakeRunner) Run(script string) (string, error) {
 		}
 	}
 	// Model the audit read: the exercise parses only THROUGH the ordered sentinel,
-	// so a realistic audit-log tail must CONTAIN it. Append the sentinel the
-	// exercise derives from `stat -c '%s %i'` (size=offset, inode) after whatever
-	// slice the test injected, so the sentinel-bounded parse finds its window.
+	// so a realistic audit-log tail must CONTAIN it. The barrier token is now an
+	// unguessable crypto/rand nonce (round 71) — it can no longer be derived from
+	// `stat` output — so echo back the exact token the exercise just emitted via
+	// `auditctl -m`, after whatever slice the test injected.
 	if strings.Contains(script, "tail -c") && strings.Contains(script, "audit.log") {
 		slice := f.staticMatch(script)
-		off, ino := "0", "0"
-		if ff := strings.Fields(f.staticMatch("stat -c '%s %i'")); len(ff) == 2 {
-			off, ino = ff[0], ff[1]
-		}
 		if slice != "" && !strings.HasSuffix(slice, "\n") {
 			slice += "\n"
 		}
-		return slice + "hardener-barrier-" + ino + "-" + off + "\n", nil
+		tok := f.emittedBarrier()
+		if f.duplicateBarrier {
+			return slice + tok + "\ntype=AVC hidden-by-early-boundary\n" + tok + "\n", nil
+		}
+		return slice + tok + "\n", nil
 	}
 	// Stateful sequence responses win over static ones, longest match first.
 	seqBest := ""
@@ -64,6 +68,25 @@ func (f *fakeRunner) Run(script string) (string, error) {
 		return q[i], nil
 	}
 	return f.staticMatch(script), nil
+}
+
+// emittedBarrier returns the most recent `auditctl -m 'hardener-barrier-...'`
+// token the code under test emitted. The token is an unguessable nonce, so the
+// fake cannot reconstruct it — it must echo back what was actually sent.
+func (f *fakeRunner) emittedBarrier() string {
+	for i := len(f.calls) - 1; i >= 0; i-- {
+		c := f.calls[i]
+		if !strings.Contains(c, "auditctl -m") || !strings.Contains(c, "hardener-barrier-") {
+			continue
+		}
+		start := strings.Index(c, "hardener-barrier-")
+		tok := c[start:]
+		if q := strings.IndexByte(tok, '\''); q >= 0 {
+			tok = tok[:q]
+		}
+		return strings.TrimSpace(tok)
+	}
+	return ""
 }
 
 // staticMatch returns the response whose key is the longest substring of script
