@@ -59,10 +59,12 @@ func TestShortBasenameSubstringRejected(t *testing.T) {
 			t.Errorf("%s must not be adopted for app plex (reverse-substring hole)", bad)
 		}
 	}
-	// The real plex binary, declared, is still fine.
-	p2 := prof("plex", []string{"/usr/lib/plexmediaserver/Plex Media Server"})
+	// The real plex binary is owned via its declared PATH (rule 2), as plex.yaml
+	// declares /usr/lib/plexmediaserver(/.*)? — declaration of the executable
+	// alone is no longer sufficient.
+	p2 := prof("plex", []string{"/usr/lib/plexmediaserver/Plex Media Server"}, "/usr/lib/plexmediaserver(/.*)?")
 	if !isAppOwnedExecutable(p2, "/usr/lib/plexmediaserver/Plex Media Server") {
-		t.Error("declared plex binary must remain app-owned")
+		t.Error("plex binary under its declared path must be app-owned")
 	}
 }
 
@@ -77,12 +79,11 @@ func TestAppOwnedExecutablesAreEntrypoints(t *testing.T) {
 		{"emby", "/opt/emby-server/bin/emby-server", prof("emby", nil)},
 		{"nats-server", "/usr/bin/nats-server", prof("nats-server", nil)},
 		{"gitea", "/opt/gitea/bin/gitea", prof("gitea", nil)},
-		// Plex's vendor dir has no separator boundary to "plex", so it relies
-		// on the manifest declaring the executable (as plex.yaml does).
-		{"plex", "/usr/lib/plexmediaserver/Plex Media Server", prof("plex", []string{"/usr/lib/plexmediaserver/Plex Media Server"})},
+		// Plex's vendor dir has no separator boundary to "plex", so ownership
+		// comes from the declared PATH (rule 2), as plex.yaml declares it.
+		{"plex", "/usr/lib/plexmediaserver/Plex Media Server", prof("plex", []string{"/usr/lib/plexmediaserver/Plex Media Server"}, "/usr/lib/plexmediaserver(/.*)?")},
 		{"webmin", "/usr/libexec/webmin/miniserv.pl", prof("webmin", nil)},
 		{"mosquitto", "/usr/sbin/mosquitto", prof("mosquitto", nil)},
-		{"declared", "/weird/path/thing", prof("declared", []string{"/weird/path/thing"})},
 		{"claimed", "/srv/claimed/run", prof("claimed", nil, "/srv/claimed(/.*)?")},
 	}
 	for _, c := range cases {
@@ -126,8 +127,14 @@ func TestDeclaredSharedBinNotOwned(t *testing.T) {
 	if !isAppOwnedExecutable(prof("nats-server", nil), "/usr/bin/nats-server") {
 		t.Error("app-named binary in /usr/bin must remain owned via the name tie")
 	}
-	// A declared VENDOR-dir path is still owned by declaration.
-	if !isAppOwnedExecutable(prof("plex", []string{"/usr/lib/plexmediaserver/Plex Media Server"}), "/usr/lib/plexmediaserver/Plex Media Server") {
-		t.Error("declared vendor-dir binary must remain owned")
+	// A vendor-dir binary is owned via the declared PATH (rule 2), not by
+	// declaring the executable alone (which is no longer sufficient anywhere).
+	if !isAppOwnedExecutable(prof("plex", []string{"/usr/lib/plexmediaserver/Plex Media Server"}, "/usr/lib/plexmediaserver(/.*)?"), "/usr/lib/plexmediaserver/Plex Media Server") {
+		t.Error("vendor-dir binary under a declared path must remain owned")
+	}
+	// Declaration ALONE — even outside a shared bin dir — is NOT ownership: a
+	// declared shared system file must not be adopted (review finding).
+	if isAppOwnedExecutable(prof("myapp", []string{"/usr/lib/systemd/system/sshd.service"}), "/usr/lib/systemd/system/sshd.service") {
+		t.Error("declaring a shared system file must not confer app ownership")
 	}
 }

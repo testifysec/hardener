@@ -190,6 +190,15 @@ func Load(path string) (*Target, error) {
 			}
 		}
 		root := literalRoot(pa.Path)
+		// Bounded grammar: the ONLY regex construct allowed is a single terminal
+		// (/.*)?. A path is accepted only as a literal absolute path, or that path
+		// plus (/.*)?. Otherwise an alternation like /etc/widget(/.*)?|/etc/shadow
+		// passes the literal-root checks (root is /etc/widget) yet GenerateFC emits
+		// the whole expression verbatim and restorecon relabels /etc/shadow via the
+		// alternation (review finding).
+		if pa.Path != root && pa.Path != root+"(/.*)?" {
+			return nil, fmt.Errorf("%s: paths[%d] (%s): unsupported file-context expression — use a literal path optionally followed by a single terminal (/.*)?", path, i, pa.Path)
+		}
 		if isBroadSystemRoot(root) {
 			return nil, fmt.Errorf("%s: paths[%d] (%s): root %q is a broad system tree; declare a bounded, app-specific path", path, i, pa.Path, root)
 		}

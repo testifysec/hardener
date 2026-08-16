@@ -190,7 +190,22 @@ _pruned=""
 # leaving an unverified, inconsistent policy active (review finding). This runs
 # before the trap and any change, so aborting here leaves the prior state intact.
 _snap=""
-if [ "$_op" != 1 ]; then
+if [ "$_op" = 1 ]; then
+    # Fresh install: a module with our name must NOT already exist. RPM reports a
+    # first install, so any pre-existing module is FOREIGN — installed manually,
+    # by the base policy, or by another package. Loading ours would silently
+    # shadow it, and a rollback would remove it (semodule -r), destroying
+    # unrelated policy. Refuse before mutating anything (review finding).
+    if semodule -l 2>/dev/null | grep -qE "^%[1]s( |$)"; then
+        echo "ERROR: a SELinux module named %[1]s already exists, but this is a fresh install; refusing to shadow a foreign module. Remove it first or build with a distinct name." >&2
+        exit 1
+    fi
+else
+    # Upgrade: snapshot the currently-installed module before replacing it. If the
+    # snapshot cannot be taken we ABORT before mutating anything — proceeding would
+    # make a later failure non-atomic (we could not restore the prior module),
+    # leaving an unverified, inconsistent policy active (review finding). This runs
+    # before the trap and any change, so aborting here leaves the prior state intact.
     _snap="$(mktemp -d 2>/dev/null || true)"
     if [ -z "$_snap" ] || ! ( cd "$_snap" && semodule -E %[1]s ) 2>/dev/null; then
         echo "ERROR: could not snapshot the current %[1]s module for rollback; refusing a non-atomic upgrade" >&2

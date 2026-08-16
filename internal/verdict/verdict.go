@@ -147,6 +147,14 @@ func Build(res *pipeline.Result, env Env, extra []Subject) Statement {
 // was installed and exercised, not just the generated policy text.
 func BuildOrErr(res *pipeline.Result, env Env, extra []Subject) (Statement, error) {
 	app := policy.SafeName(res.Target.Name)
+	// One canonical party value. res.Target.Party is the manifest authority and
+	// is what gets SIGNED into the predicate; res.Party is a second field the
+	// caller fills during conformance and can be empty or, if mis-wired, differ.
+	// Reject a disagreement loudly rather than sign one party while fail-closing
+	// on another (review finding).
+	if res.Party != "" && res.Party != res.Target.Party {
+		return Statement{}, fmt.Errorf("inconsistent party: signed target says %q but conformance says %q", res.Target.Party, res.Party)
+	}
 	subjects := make([]wireSubject, 0, len(extra)+4)
 	add := func(name, digest string) error {
 		if !sha256Re.MatchString(digest) {
@@ -194,7 +202,7 @@ func BuildOrErr(res *pipeline.Result, env Env, extra []Subject) (Statement, erro
 			ResidualDenials:   len(res.ResidualAVCs),
 		},
 		Conformance: Conformance{
-			Party: res.Party, Undeclared: res.ConformanceUndecl,
+			Party: res.Target.Party, Undeclared: res.ConformanceUndecl,
 			Unexercised: res.ConformanceUnexer, Fatal: res.ConformanceFatal,
 		},
 		Coverage: Coverage{
@@ -297,12 +305,15 @@ func failureOf(res *pipeline.Result) string {
 		return res.FailureReason
 	case res.ConformanceFatal != "":
 		return res.ConformanceFatal
-	case len(res.ConformanceUndecl) > 0 && (res.Party == "second" || res.Party == "first"):
+	case len(res.ConformanceUndecl) > 0 && (res.Target.Party == "second" || res.Target.Party == "first"):
 		// Defense in depth against an inconsistent result: undeclared behavior is
 		// fatal for a first/second-party artifact, so fail closed on the
 		// structured ConformanceUndecl data even if the fatal-summary string was
-		// never set (review finding — the two could disagree and pass).
-		return "undeclared behavior for a " + res.Party + "-party artifact: " + strings.Join(res.ConformanceUndecl, ", ")
+		// never set (review finding — the two could disagree and pass). Keyed on
+		// res.Target.Party — the SAME party value that gets SIGNED into the
+		// predicate — not res.Party, a second field that can be empty or disagree
+		// (review finding: a signed "second" with an empty res.Party passed).
+		return "undeclared behavior for a " + res.Target.Party + "-party artifact: " + strings.Join(res.ConformanceUndecl, ", ")
 	case !res.DomainOK:
 		return "process does not run in the generated domain"
 	case !res.ExerciseOK:

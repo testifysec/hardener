@@ -177,3 +177,35 @@ func TestVerdictFailsOnUndeclaredWithoutFatal(t *testing.T) {
 		t.Error("third-party undeclared behavior is advisory, must not fail")
 	}
 }
+
+// Round 27: the SIGNED party is res.Target.Party, but fail-closed conformance
+// used res.Party — a second field that is empty in passingResult(). A "second"
+// artifact with undeclared behavior then passed. failureOf must key on the same
+// party that gets signed.
+func TestVerdictFailsUndeclaredWhenResPartyEmpty(t *testing.T) {
+	r := passingResult() // Target.Party="second", res.Party=""
+	r.RPMPath = ""
+	r.Party = "" // the exact inconsistency: signed says second, res.Party empty
+	r.ConformanceUndecl = []string{"capability setuid"}
+	st, err := BuildOrErr(r, Env{}, nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if st.Predicate.Verdict != "fail" {
+		t.Errorf("second-party undeclared behavior must fail even with empty res.Party, got %q", st.Predicate.Verdict)
+	}
+	if st.Predicate.Conformance.Party != "second" {
+		t.Errorf("conformance party must reflect the signed target party, got %q", st.Predicate.Conformance.Party)
+	}
+}
+
+// A disagreement between the signed target party and res.Party is a wiring bug
+// and must fail construction loudly, not sign one while fail-closing on another.
+func TestVerdictRejectsPartyMismatch(t *testing.T) {
+	r := passingResult() // Target.Party="second"
+	r.RPMPath = ""
+	r.Party = "third" // disagrees with the signed target party
+	if _, err := BuildOrErr(r, Env{}, nil); err == nil {
+		t.Error("a party mismatch between res.Target.Party and res.Party must fail construction")
+	}
+}
