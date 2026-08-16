@@ -37,7 +37,7 @@ func TestExtractObserved(t *testing.T) {
 	if !reflectEq(obs.ForeignTypes, []string{"cert_t:file:open", "cert_t:file:read"}) {
 		t.Errorf("foreign types: %v (type:class:perm, excluding own and port types)", obs.ForeignTypes)
 	}
-	if !reflectEq(obs.ForeignPortBinds, []string{"http_cache_port_t:tcp_socket"}) {
+	if !reflectEq(obs.ForeignPortBinds, []string{"http_cache_port_t:tcp_socket:0"}) {
 		t.Errorf("foreign port binds: %v", obs.ForeignPortBinds)
 	}
 	if len(obs.Ports) != 1 || obs.Ports[0].Port != 8443 {
@@ -75,7 +75,7 @@ func TestForeignPortConnectSurfacesAsForeignType(t *testing.T) {
 	both := ExtractObserved(widgetProfile(), []policy.AllowRule{
 		{Source: "widget_t", Target: "dns_port_t", Class: "tcp_socket", Perms: []string{"name_bind", "name_connect"}},
 	})
-	if !has(both.ForeignPortBinds, "dns_port_t:tcp_socket") || !has(both.ForeignTypes, "dns_port_t:tcp_socket:name_connect") {
+	if !has(both.ForeignPortBinds, "dns_port_t:tcp_socket:0") || !has(both.ForeignTypes, "dns_port_t:tcp_socket:name_connect") {
 		t.Errorf("bind+connect must record both: binds=%v types=%v", both.ForeignPortBinds, both.ForeignTypes)
 	}
 }
@@ -236,26 +236,54 @@ func TestForeignAccessEscalationFlagged(t *testing.T) {
 func TestBindKeyDistinguishesProtocol(t *testing.T) {
 	p := &profile.Profile{Name: "widget"}
 	rules := []policy.AllowRule{
-		{Source: "widget_t", Target: "dns_port_t", Class: "tcp_socket", Perms: []string{"name_bind"}},
-		{Source: "widget_t", Target: "dns_port_t", Class: "udp_socket", Perms: []string{"name_bind"}},
+		{Source: "widget_t", Target: "dns_port_t", Class: "tcp_socket", Perms: []string{"name_bind"}, Port: 53},
+		{Source: "widget_t", Target: "dns_port_t", Class: "udp_socket", Perms: []string{"name_bind"}, Port: 53},
 	}
 	obs := ExtractObserved(p, rules)
 	got := strings.Join(obs.ForeignPortBinds, ",")
-	if !strings.Contains(got, "dns_port_t:tcp_socket") || !strings.Contains(got, "dns_port_t:udp_socket") {
+	if !strings.Contains(got, "dns_port_t:tcp_socket:53") || !strings.Contains(got, "dns_port_t:udp_socket:53") {
 		t.Fatalf("tcp and udp binds must be distinct entries, got %v", obs.ForeignPortBinds)
 	}
 	// A declaration that only permits the TCP bind must flag the UDP bind as
 	// undeclared, not silently absorb it.
-	decl := &profile.Declaration{ForeignPortBinds: []string{"dns_port_t:tcp_socket"}}
+	decl := &profile.Declaration{ForeignPortBinds: []string{"dns_port_t:tcp_socket:53"}}
 	rep := Compare(decl, obs)
 	found := false
 	for _, f := range rep.Undeclared {
-		if f.Kind == "port-bind" && f.Item == "dns_port_t:udp_socket" {
+		if f.Kind == "port-bind" && f.Item == "dns_port_t:udp_socket:53" {
 			found = true
 		}
 	}
 	if !found {
 		t.Errorf("undeclared udp bind must be flagged, got %+v", rep.Undeclared)
+	}
+}
+
+// Round 61: two binds with the SAME SELinux port type and socket class but
+// DIFFERENT numeric ports must be distinct observations — keying by type:class
+// alone let a new bind on another port sharing unreserved_port_t collapse into
+// an existing declaration and pass as clean supply-chain evidence.
+func TestBindKeyDistinguishesPort(t *testing.T) {
+	p := &profile.Profile{Name: "widget"}
+	rules := []policy.AllowRule{
+		{Source: "widget_t", Target: "unreserved_port_t", Class: "tcp_socket", Perms: []string{"name_bind"}, Port: 8080},
+		{Source: "widget_t", Target: "unreserved_port_t", Class: "tcp_socket", Perms: []string{"name_bind"}, Port: 9090},
+	}
+	obs := ExtractObserved(p, rules)
+	if len(obs.ForeignPortBinds) != 2 {
+		t.Fatalf("two different ports on the same type/class must be two entries, got %v", obs.ForeignPortBinds)
+	}
+	// Declaring only the 8080 bind must flag the 9090 bind, not absorb it.
+	decl := &profile.Declaration{ForeignPortBinds: []string{"unreserved_port_t:tcp_socket:8080"}}
+	rep := Compare(decl, obs)
+	found := false
+	for _, f := range rep.Undeclared {
+		if f.Kind == "port-bind" && f.Item == "unreserved_port_t:tcp_socket:9090" {
+			found = true
+		}
+	}
+	if !found {
+		t.Errorf("a new bind on another port sharing the type must be flagged undeclared, got %+v", rep.Undeclared)
 	}
 }
 

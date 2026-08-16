@@ -5,6 +5,7 @@ import (
 	"testing"
 
 	"github.com/testifysec/hardener/internal/avc"
+	"github.com/testifysec/hardener/internal/profile"
 )
 
 // A denial whose target path falls under one of our own file-context mappings
@@ -308,4 +309,31 @@ func anyFlagContains(flags []Flag, sub string) bool {
 		}
 	}
 	return false
+}
+
+// SELinux labels a file by the MOST-SPECIFIC file_contexts entry. expectedType
+// returns the first matcher, so a broad claim listed BEFORE a nested one would
+// misread a correctly-labeled nested file as relabel drift (and could suppress a
+// W^X/review finding). compileFCMatchers must order most-specific first.
+// (review finding — round 61)
+func TestFCMatcherPrefersMostSpecific(t *testing.T) {
+	p := &profile.Profile{
+		Name:        "widget",
+		Executables: []string{"/opt/widget/bin/widgetd"},
+		Paths: []profile.PathAccess{
+			{Path: "/var/lib/widget(/.*)?", Kind: "var_lib"},         // BROAD, listed first
+			{Path: "/var/lib/widget/plugins(/.*)?", Kind: "content"}, // NESTED, listed second
+		},
+	}
+	ms := compileFCMatchers(p)
+	if got, ok := expectedType(ms, "/var/lib/widget/plugins/x.so"); !ok || got != "widget_content_t" {
+		t.Errorf("nested path must resolve to the most-specific type widget_content_t, got %q (ok=%v)", got, ok)
+	}
+	if got, ok := expectedType(ms, "/var/lib/widget/state.db"); !ok || got != "widget_var_lib_t" {
+		t.Errorf("a file only under the broad path must resolve to widget_var_lib_t, got %q", got)
+	}
+	// The exact executable still wins over any tree claim covering it.
+	if got, ok := expectedType(ms, "/opt/widget/bin/widgetd"); !ok || got != "widget_exec_t" {
+		t.Errorf("exact executable must resolve to widget_exec_t, got %q", got)
+	}
 }
