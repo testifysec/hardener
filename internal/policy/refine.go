@@ -16,6 +16,11 @@ type AllowRule struct {
 	Target string
 	Class  string
 	Perms  []string
+	// Port is the bound port for a name_bind on a *_port_t target (from the AVC
+	// src=), 0 otherwise. It never appears in Render() — a SELinux rule carries no
+	// port — but it distinguishes two binds on the SAME port type so conformance
+	// does not collapse a new port into an existing declaration (review finding).
+	Port int
 }
 
 // Render emits the rule in .te syntax with perms in sorted order.
@@ -239,7 +244,7 @@ func Refine(p *profile.Profile, denials []avc.Denial) Refinement {
 		if d.Class == "file" && strings.HasSuffix(d.TargetType, "_exec_t") && hasPerm(perms, "execute") {
 			perms = unionPerms(perms, []string{"execute", "execute_no_trans", "getattr", "map", "open", "read"})
 		}
-		rule := AllowRule{Source: dom, Target: d.TargetType, Class: d.Class, Perms: perms}
+		rule := AllowRule{Source: dom, Target: d.TargetType, Class: d.Class, Perms: perms, Port: d.Src}
 		reason := dangerReason(rule)
 		// Self-modification of read-only program files: a write/create/unlink
 		// to the app's OWN content_t or exec_t defeats the read-only intent of
@@ -425,30 +430,55 @@ func isFileClass(c string) bool {
 }
 
 type fcMatcher struct {
-	re  *regexp.Regexp
-	typ string
+	re   *regexp.Regexp
+	typ  string
+	spec int // SELinux-style specificity; higher wins (most-specific match)
+}
+
+// fcSpecificity scores a file-context expression the way SELinux resolves
+// overlaps: the MOST-SPECIFIC (longest literal stem) wins, and an exact literal
+// outranks a regex sharing that stem. Returned as literalStemLen*2 (+1 exact).
+func fcSpecificity(expr string) int {
+	stem := len(expr)
+	exact := true
+	for i, r := range expr {
+		if strings.ContainsRune("(.*+?[]{}^$|\\", r) {
+			stem = i
+			exact = false
+			break
+		}
+	}
+	s := stem * 2
+	if exact {
+		s++
+	}
+	return s
 }
 
 func compileFCMatchers(p *profile.Profile) []fcMatcher {
 	var ms []fcMatcher
-	// Exact executable matchers FIRST: an executable path also matches the
-	// app's broad content/tree claim, and expectedType returns the first
-	// match. Checking exact matchers first keeps a correctly-labeled _exec_t
-	// helper from being misread as relabel drift (review finding).
+	// Executables are EXACT paths (most specific possible).
 	for _, exe := range p.Executables {
 		re, err := regexp.Compile("^" + regexp.QuoteMeta(exe) + "$")
 		if err != nil {
 			continue
 		}
-		ms = append(ms, fcMatcher{re, TypeForKind(p.Name, KindExec)})
+		ms = append(ms, fcMatcher{re, TypeForKind(p.Name, KindExec), fcSpecificity(exe)})
 	}
 	for _, pa := range p.Paths {
 		re, err := regexp.Compile("^" + pa.Path + "$")
 		if err != nil {
 			continue
 		}
-		ms = append(ms, fcMatcher{re, TypeForKind(p.Name, KindFromString(pa.Kind))})
+		ms = append(ms, fcMatcher{re, TypeForKind(p.Name, KindFromString(pa.Kind)), fcSpecificity(pa.Path)})
 	}
+	// Order by SELinux precedence, MOST-SPECIFIC first. expectedType returns the
+	// first match, but SELinux labels a file by the most-specific file_contexts
+	// entry — so a broad claim listed BEFORE a nested one would otherwise misread
+	// a correctly-labeled nested file as relabel drift and discard it, suppressing
+	// a W^X/review finding on that path (review finding). A stable sort keeps
+	// equal-specificity manifest order.
+	sort.SliceStable(ms, func(i, j int) bool { return ms[i].spec > ms[j].spec })
 	return ms
 }
 

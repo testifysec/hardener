@@ -1077,7 +1077,12 @@ sudo semodule -i %s.pp
 				prune += fmt.Sprintf("-path %s -prune -o ", vm.ShellQuote(other))
 			}
 		}
-		desc, derr := r.Run(fmt.Sprintf("if [ -e %s ]; then sudo find %s %s\\( -type f -o -type d \\) ! -context '*:%s:*' -print -quit; fi", q, q, prune, wantType))
+		// Check EVERY object type beneath the root, not just files and dirs — a
+		// more-specific base rule can mislabel a socket, symlink, FIFO, or device
+		// node too, and skipping them accepted a policy that leaves them under a
+		// broader type (review finding). Prune the declared sub-roots; -quit on
+		// the first real mismatch.
+		desc, derr := r.Run(fmt.Sprintf("if [ -e %s ]; then sudo find %s %s! -context '*:%s:*' -print -quit; fi", q, q, prune, wantType))
 		if derr != nil {
 			return fmt.Errorf("could not verify descendant labels under %s: %w", root, derr)
 		}
@@ -1378,31 +1383,30 @@ func exercise(r vm.Runner, t *target.Target, dom string) ([]avc.Denial, bool, ru
 	if err != nil {
 		return nil, exOK, run, fmt.Errorf("reading audit slice: %w", err)
 	}
-	// Re-stat SIZE and inode AFTER the read. A rotation between the pre-tail stat
-	// and the SEPARATE tail would make tail read the NEW file at the stale offset
-	// and return an empty slice successfully. Checking only the inode also missed
-	// a SAME-inode TRUNCATION in that window: the file is truncated below our
-	// offset, tail returns empty, and the unchanged inode passed — a false zero-
-	// denial (review finding). Require the inode unchanged AND the size not shrunk
-	// since the pre-tail stat, so the region we read was intact throughout.
+	// The ordered SENTINEL marks the END of our window: every AVC the exercise
+	// produced was flushed before it, and everything AFTER it is unrelated audit
+	// activity — including this function's own `sudo tail`/`sudo stat`, which emit
+	// USER_CMD records on an audited host. Parse only up to the sentinel. Requiring
+	// the GLOBAL log size to stay unchanged across the read (the previous check)
+	// was redundant with the sentinel AND flaky: unrelated appends failed valid
+	// runs nondeterministically (review finding). The sentinel MUST be present in
+	// the slice; if it is not, our offset was rotated/truncated out from under us.
+	idx := strings.Index(out, sentinel)
+	if idx < 0 {
+		return nil, exOK, run, fmt.Errorf("audit write-barrier sentinel not found in the read slice — the window may have rotated or truncated under our offset; re-run")
+	}
+	out = out[:idx]
+	// Re-stat inode AFTER the read: a rotation between the pre-tail stat and the
+	// SEPARATE tail would make tail read a NEW file at the stale offset and return
+	// a slice with no sentinel (already caught above) — the inode check is the
+	// direct signal. We do NOT compare size: growth after the sentinel is expected
+	// and harmless.
 	post2, err := r.Run("sudo stat -c '%i' /var/log/audit/audit.log")
 	if err != nil {
 		return nil, exOK, run, fmt.Errorf("audit log post-read stat: %w", err)
 	}
 	if strings.TrimSpace(post2) != startInode {
 		return nil, exOK, run, fmt.Errorf("audit log rotated during read (inode %s→%s) — re-run", startInode, strings.TrimSpace(post2))
-	}
-	// The size must be UNCHANGED across the read. Accepting non-shrinkage was
-	// fail-open: if the log GREW between the pre-tail stat and the tail, an AVC was
-	// appended that our `tail -c +offset` (which stops at its own EOF) may not have
-	// captured — a false zero-denial (review finding). A shrink means truncation.
-	// Either direction fails: the region we read must have been stable throughout.
-	post2s, err := r.Run("sudo stat -c '%s' /var/log/audit/audit.log")
-	if err != nil {
-		return nil, exOK, run, fmt.Errorf("audit log post-read size stat: %w", err)
-	}
-	if s := strings.TrimSpace(post2s); s != "" && s != strings.TrimSpace(postFields[0]) {
-		return nil, exOK, run, fmt.Errorf("audit log changed size during read (%s→%s bytes) — a record may have been written after the read; re-run", postFields[0], s)
 	}
 	// If the kernel dropped audit records during the window, the slice we just
 	// read may be missing AVCs — a zero-denial result would be a false pass. Only
@@ -1581,7 +1585,9 @@ func parseRunInfo(out string) runInfo {
 func mergeNewRules(acc *[]policy.AllowRule, fresh []policy.AllowRule) int {
 	have := map[string]bool{}
 	key := func(r policy.AllowRule, p string) string {
-		return r.Source + "/" + r.Target + "/" + r.Class + "/" + p
+		// Port is part of identity: two name_bind rules on the same *_port_t but
+		// different ports must stay distinct so conformance sees both (review finding).
+		return fmt.Sprintf("%s/%s/%s/%d/%s", r.Source, r.Target, r.Class, r.Port, p)
 	}
 	for _, r := range *acc {
 		for _, p := range r.Perms {
@@ -1598,7 +1604,7 @@ func mergeNewRules(acc *[]policy.AllowRule, fresh []policy.AllowRule) int {
 			}
 		}
 		if len(newPerms) > 0 {
-			*acc = append(*acc, policy.AllowRule{Source: r.Source, Target: r.Target, Class: r.Class, Perms: newPerms})
+			*acc = append(*acc, policy.AllowRule{Source: r.Source, Target: r.Target, Class: r.Class, Perms: newPerms, Port: r.Port})
 			added++
 		}
 	}
@@ -1610,11 +1616,18 @@ func mergeNewRules(acc *[]policy.AllowRule, fresh []policy.AllowRule) int {
 // is part of the key so rules for different domains are never collapsed into
 // one another's permission set (review finding).
 func normalizeRules(rules []policy.AllowRule) []policy.AllowRule {
-	type key struct{ s, t, c string }
+	// Port is part of the key so two name_bind rules on the same *_port_t but
+	// different ports are NOT merged — conformance must see each bound port
+	// (review finding). Port is 0 for every non-port rule, so this is a no-op
+	// for them.
+	type key struct {
+		s, t, c string
+		port    int
+	}
 	idx := map[key]int{}
 	var out []policy.AllowRule
 	for _, r := range rules {
-		k := key{r.Source, r.Target, r.Class}
+		k := key{r.Source, r.Target, r.Class, r.Port}
 		if i, ok := idx[k]; ok {
 			out[i].Perms = unionSorted(out[i].Perms, r.Perms)
 			continue

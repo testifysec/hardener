@@ -142,7 +142,7 @@ func GenerateSpec(p *profile.Profile, revision string) string {
 				// catches LOCAL customizations, not base file_contexts). Prune legitimately
 				// overlapping declared sub-roots, stop at the FIRST mismatch (-quit), and
 				// FAIL CLOSED on a find error — mirrors the verifier-side check exactly.
-				"_bad=$(find \"$_r\" %[3]s\\( -type f -o -type d \\) ! -context '*:%[2]s:*' -print -quit 2>/dev/null) || { printf 'ERROR: could not verify descendant labels under %%s; refusing\\n' \"$_r\" >&2; exit 1; }; "+
+				"_bad=$(find \"$_r\" %[3]s! -context '*:%[2]s:*' -print -quit 2>/dev/null) || { printf 'ERROR: could not verify descendant labels under %%s; refusing\\n' \"$_r\" >&2; exit 1; }; "+
 				"if [ -n \"$_bad\" ]; then printf 'ERROR: descendant %%s under declared root %%s is not labeled %[2]s — a more-specific file-context rule is overriding it\\n' \"$_bad\" \"$_r\" >&2; exit 1; fi; fi\n",
 			vm.ShellQuote(root), wantType, prune)
 	}

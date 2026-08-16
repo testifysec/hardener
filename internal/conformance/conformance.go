@@ -92,13 +92,12 @@ func ExtractObserved(p *profile.Profile, rules []policy.AllowRule) Observed {
 			// it still faces the declaration comparison.
 			for _, perm := range r.Perms {
 				if perm == "name_bind" {
-					// Key the bind by type:class so a tcp_socket bind and a
-					// udp_socket bind on the SAME *_port_t are distinct entries.
-					// Keying by type alone let an added UDP bind collapse into an
-					// existing TCP one, so first-party drift and second-party
-					// undeclared behavior passed on identical baselines (review
-					// finding).
-					bindSet[r.Target+":"+r.Class] = true
+					// Key the bind by type:class:PORT. Keying by type:class alone
+					// lost the numeric port, so a NEW bind on another port sharing
+					// unreserved_port_t collapsed into an existing declaration and
+					// passed as clean supply-chain evidence (review finding). The
+					// port comes from the AVC src=, carried on AllowRule.Port.
+					bindSet[fmt.Sprintf("%s:%s:%d", r.Target, r.Class, r.Port)] = true
 				} else {
 					foreignSet[foreignKey(r.Target, r.Class, perm)] = true
 				}

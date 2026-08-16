@@ -29,6 +29,21 @@ func (f *fakeRunner) Run(script string) (string, error) {
 			return "", errors.New("exit status 1")
 		}
 	}
+	// Model the audit read: the exercise parses only THROUGH the ordered sentinel,
+	// so a realistic audit-log tail must CONTAIN it. Append the sentinel the
+	// exercise derives from `stat -c '%s %i'` (size=offset, inode) after whatever
+	// slice the test injected, so the sentinel-bounded parse finds its window.
+	if strings.Contains(script, "tail -c") && strings.Contains(script, "audit.log") {
+		slice := f.staticMatch(script)
+		off, ino := "0", "0"
+		if ff := strings.Fields(f.staticMatch("stat -c '%s %i'")); len(ff) == 2 {
+			off, ino = ff[0], ff[1]
+		}
+		if slice != "" && !strings.HasSuffix(slice, "\n") {
+			slice += "\n"
+		}
+		return slice + "hardener-barrier-" + ino + "-" + off + "\n", nil
+	}
 	// Stateful sequence responses win over static ones, longest match first.
 	seqBest := ""
 	for pattern := range f.seq {
@@ -48,19 +63,20 @@ func (f *fakeRunner) Run(script string) (string, error) {
 		f.seqPos[seqBest]++
 		return q[i], nil
 	}
-	// Longest (most specific) matching key wins — deterministic, and lets a
-	// command that contains several keys (e.g. the MainPID capture also runs
-	// sha256sum) resolve to the intended response.
+	return f.staticMatch(script), nil
+}
+
+// staticMatch returns the response whose key is the longest substring of script
+// (most specific wins) — deterministic, and lets a command containing several
+// keys resolve to the intended response. No seq side effects.
+func (f *fakeRunner) staticMatch(script string) string {
 	best, bestOut := "", ""
 	for pattern, out := range f.responses {
 		if strings.Contains(script, pattern) && len(pattern) > len(best) {
 			best, bestOut = pattern, out
 		}
 	}
-	if best != "" {
-		return bestOut, nil
-	}
-	return "", nil
+	return bestOut
 }
 
 func (f *fakeRunner) WriteFile(path, content string) error {
