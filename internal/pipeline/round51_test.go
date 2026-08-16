@@ -80,3 +80,32 @@ func TestSpecRollbackVerifiesModuleRestoration(t *testing.T) {
 		}
 	}
 }
+
+// %postun must CAPTURE and validate the port listing before deletion (piping an
+// unvalidated `semanage port -l` into awk|grep is fail-open — a failed
+// enumeration skips deletion, semodule -r then fails on the referenced type, and
+// RPM removal "succeeds" leaving the module + stale bind privilege). It must also
+// VERIFY module removal. (review finding — round 63)
+func TestSpecPostunValidatesPortCleanupAndModuleRemoval(t *testing.T) {
+	p := &profile.Profile{
+		Name:        "widget",
+		Executables: []string{"/opt/widget/bin/widgetd"},
+		Ports:       []profile.Port{{Proto: "tcp", Port: 8443}},
+	}
+	spec := GenerateSpec(p, "20260101000000")
+	for _, want := range []string{
+		`_pl="$(semanage port -l 2>/dev/null)"`,
+		"cannot enumerate SELinux ports during widget_port_t uninstall",
+		"refusing to leave a stale bind privilege",                    // port deletion fails closed
+		"the widget policy module is still installed after uninstall", // module removal verified
+	} {
+		if !strings.Contains(spec, want) {
+			t.Errorf("%%postun missing validated cleanup: %q", want)
+		}
+	}
+	// The old fail-open form (piping semanage port -l straight into awk in %postun)
+	// must be gone.
+	if strings.Contains(spec, "if semanage port -l 2>/dev/null | awk -v t=widget_port_t") {
+		t.Error("postun still pipes an unvalidated semanage port -l into awk")
+	}
+}

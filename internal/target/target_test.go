@@ -482,3 +482,52 @@ paths:
 		t.Errorf("/run/widget is a legitimate bounded runtime dir, must load: %v", err)
 	}
 }
+
+// GenerateFC would emit overlapping entries with different types for the same
+// path, which semodule rejects. Conflicting in-profile claims must be caught at
+// manifest load. (review finding — round 63)
+func TestLoadRejectsConflictingFileContextClaims(t *testing.T) {
+	// Same path, two different kinds.
+	dupKind := `name: widget
+install: "true"
+unit: widget.service
+exercise: "true"
+executables:
+  - /opt/widget/bin/widgetd
+paths:
+  - { path: "/var/lib/widget(/.*)?", kind: var_lib }
+  - { path: "/var/lib/widget(/.*)?", kind: content }
+`
+	if _, err := Load(write(t, dupKind)); err == nil {
+		t.Error("same path with two different kinds must be rejected")
+	}
+
+	// An executable path also declared as a data path.
+	execAsPath := `name: widget
+install: "true"
+unit: widget.service
+exercise: "true"
+executables:
+  - /opt/widget/bin/widgetd
+paths:
+  - { path: "/opt/widget/bin/widgetd", kind: content, owned: true }
+`
+	if _, err := Load(write(t, execAsPath)); err == nil {
+		t.Error("an executable also declared as a path must be rejected")
+	}
+
+	// An exact duplicate (same path, same kind) is idempotent, not a conflict.
+	dupSame := `name: widget
+install: "true"
+unit: widget.service
+exercise: "true"
+executables:
+  - /opt/widget/bin/widgetd
+paths:
+  - { path: "/var/lib/widget(/.*)?", kind: var_lib }
+  - { path: "/var/lib/widget(/.*)?", kind: var_lib }
+`
+	if _, err := Load(write(t, dupSame)); err != nil {
+		t.Errorf("an exact duplicate path+kind is idempotent, must load: %v", err)
+	}
+}

@@ -316,6 +316,23 @@ func Load(path string) (*Target, error) {
 			return nil, fmt.Errorf("%s: paths[%d] (%s): no path component ties to app %q at a token boundary — hardener will not relabel an unrelated system path. If this really is an app-owned vendor directory (e.g. plexmediaserver for plex), set `owned: true` on this path to vouch for it explicitly", path, i, pa.Path, t.Name)
 		}
 	}
+	// Reject CONFLICTING in-profile file-context claims. GenerateFC would emit
+	// overlapping entries with DIFFERENT types for the same path — the same regex
+	// under two kinds, or an executable path repeated as a data/config path — and
+	// semodule rejects a module with such a duplicate spec, failing the install
+	// (review finding). Detect it at manifest load, not at install time.
+	pathKind := map[string]string{}
+	for i, pa := range t.Paths {
+		if prev, ok := pathKind[pa.Path]; ok && prev != pa.Kind {
+			return nil, fmt.Errorf("%s: paths[%d] (%s): declared twice with different kinds (%s and %s) — one path cannot carry two SELinux types", path, i, pa.Path, prev, pa.Kind)
+		}
+		pathKind[pa.Path] = pa.Kind
+	}
+	for i, exe := range t.Executables {
+		if _, ok := pathKind[exe]; ok {
+			return nil, fmt.Errorf("%s: executables[%d] (%s): also declared as a path — an executable takes the _exec_t type and cannot simultaneously carry a data/config type", path, i, exe)
+		}
+	}
 	// Port proto/number are interpolated into root %post/%postun `semanage port`
 	// commands, so an unvalidated protocol string could carry shell
 	// metacharacters into install-time execution — and an unsupported protocol
