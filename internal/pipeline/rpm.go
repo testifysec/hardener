@@ -354,9 +354,21 @@ _rollback() {
         # reloaded — suppressing the error left the app with the rejected new module
         # or NO module, i.e. running under unverified/absent policy while RPM only
         # reported failure (review finding).
-        ( cd "$_snap" && { semodule -i %[1]s.cil || semodule -i %[1]s.pp; } ) 2>/dev/null || :
-        if ! semodule -l 2>/dev/null | grep -qE "^%[1]s([[:space:]]|$)"; then
-            echo "CRITICAL: could not restore the previous %[1]s policy module during rollback; the application has NO verified policy active. Restore it from the prior package immediately." >&2
+        # A NAME check is insufficient here: the REJECTED new module shares our
+        # name, so a semodule-l name grep passes even if restoration failed,
+        # leaving the rejected policy active (review finding). Require the restore
+        # command to SUCCEED, then verify the loaded module's CONTENT equals the
+        # pre-upgrade snapshot by re-extracting it and diffing against $_snap.
+        _restored=0
+        if ( cd "$_snap" && { semodule -i %[1]s.cil || semodule -i %[1]s.pp; } ) 2>/dev/null; then
+            _vfy="$(mktemp -d 2>/dev/null || true)"
+            if [ -n "$_vfy" ] && ( cd "$_vfy" && semodule -E %[1]s ) 2>/dev/null && diff -rq "$_snap" "$_vfy" >/dev/null 2>&1; then
+                _restored=1
+            fi
+            [ -n "$_vfy" ] && rm -rf "$_vfy" 2>/dev/null || :
+        fi
+        if [ "$_restored" != 1 ]; then
+            echo "CRITICAL: restoration of the previous %[1]s policy module failed or its content did not match the pre-upgrade snapshot; the application has NO verified policy active. Restore it from the prior package immediately." >&2
         fi
 %[6]s
         # Re-apply the PREVIOUS module's labels on ALL of its roots — including
