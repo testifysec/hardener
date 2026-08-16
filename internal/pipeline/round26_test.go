@@ -145,3 +145,49 @@ func TestRunRefusesHardLinkedEntrypoint(t *testing.T) {
 		t.Error("a hard-linked (shared-inode) entrypoint must not be labeled or bound")
 	}
 }
+
+// Round 30: auditing being ENABLED (not just auditd active) is required — a
+// privileged script can `auditctl -e 0` while the service stays up, suppressing
+// every AVC. exercise() must fail closed when auditing is disabled.
+func TestExerciseFailsClosedWhenAuditingDisabled(t *testing.T) {
+	tgt := &target.Target{
+		Name: "widget", Unit: "widget.service", Install: "true",
+		Exercise: "true", Executables: []string{"/opt/widget/bin/widgetd"},
+	}
+	f := &fakeRunner{responses: map[string]string{
+		"stat -c '%s %i'": "0 4242",
+		"stat -c '%i'":    "4242",
+		"auditctl -s":     "enabled 0 lost 0 backlog 0", // auditing turned OFF
+	}}
+	if _, _, _, err := exercise(f, tgt, "widget_t"); err == nil || !strings.Contains(err.Error(), "auditing is disabled") {
+		t.Fatalf("disabled auditing must fail closed, got %v", err)
+	}
+}
+
+// Round 30: a unit that does not stop after the exercise must fail closed — a
+// still-running process could generate or hide records outside the window.
+func TestExerciseFailsClosedWhenUnitDoesNotStop(t *testing.T) {
+	tgt := &target.Target{
+		Name: "widget", Unit: "widget.service", Install: "true",
+		Exercise: "true", Executables: []string{"/opt/widget/bin/widgetd"},
+	}
+	f := &fakeRunner{responses: map[string]string{
+		"stat -c '%s %i'":           "0 4242",
+		"stat -c '%i'":              "4242",
+		"auditctl -s":               "enabled 1 lost 0 backlog 0",
+		"systemctl show -p MainPID": "LABEL:system_u:system_r:widget_t:s0\nEXE:/opt/widget/bin/widgetd\nEXESHA:" + strings.Repeat("ab", 32),
+		"is-active widget.service":  "active", // still running after stop
+	}}
+	if _, _, _, err := exercise(f, tgt, "widget_t"); err == nil || !strings.Contains(err.Error(), "did not stop") {
+		t.Fatalf("a unit that will not stop must fail closed, got %v", err)
+	}
+}
+
+// Round 30: the generated RPM %post must re-check the entrypoint hard-link count
+// before relabeling — the verifier-side check does not protect the customer host.
+func TestSpecPostChecksEntrypointHardLinks(t *testing.T) {
+	spec := GenerateSpec(testTarget().Profile(), "20260101000000")
+	if !strings.Contains(spec, `stat -c '%h'`) || !strings.Contains(spec, "hard-link count") {
+		t.Errorf("%%post must check entrypoint hard-link count before relabel:\n%s", spec)
+	}
+}

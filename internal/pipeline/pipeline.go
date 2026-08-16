@@ -257,15 +257,16 @@ func Run(r vm.Runner, t *target.Target, opts Options) *Result {
 		// readlink -f resolves SYMLINKS but not HARD links. An app-owned path can
 		// be hard-linked to a shared system binary (/usr/bin/bash); restorecon
 		// would then relabel the shared inode as the app exec type, affecting every
-		// other link to it (review finding). Refuse an entrypoint whose inode has
-		// more than one link — we cannot prove all links are app-owned. (Only acted
-		// on when stat returns a parseable count > 1, so a stat-less environment is
-		// not spuriously blocked.)
-		if lc, err := r.Run(fmt.Sprintf("stat -c %%h -- %s", vm.ShellQuote(real))); err == nil {
-			if n, perr := strconv.Atoi(strings.TrimSpace(lc)); perr == nil && n > 1 {
-				opts.Log("[%s] entrypoint %s has %d hard links — refusing to label a shared inode that other links would inherit", t.Name, real, n)
-				continue
-			}
+		// other link to it (review finding). Require EXACTLY one link and FAIL
+		// CLOSED: a root-only binary that unprivileged stat cannot read, or any
+		// malformed/failed stat, must refuse the entrypoint rather than assume a
+		// single link (review finding: the earlier check failed open on stat error).
+		// Privileged stat so a root-owned entrypoint is still countable.
+		lc, lerr := r.Run(fmt.Sprintf("sudo stat -c %%h -- %s", vm.ShellQuote(real)))
+		n, perr := strconv.Atoi(strings.TrimSpace(lc))
+		if lerr != nil || perr != nil || n != 1 {
+			opts.Log("[%s] entrypoint %s: hard-link count is %q (want exactly 1) — refusing to label a shared or unstattable inode", t.Name, real, strings.TrimSpace(lc))
+			continue
 		}
 		if !seen[real] {
 			seen[real] = true
@@ -492,6 +493,13 @@ func Run(r vm.Runner, t *target.Target, opts Options) *Result {
 		out, err := r.Run("getenforce; systemctl is-active auditd")
 		if err != nil || !hasLine(out, "Enforcing") || !hasLine(out, "active") {
 			return fmt.Errorf("verifier integrity lost %s (need Enforcing + auditd): %s %v", when, strings.TrimSpace(out), err)
+		}
+		// auditd being ACTIVE is not sufficient — a privileged script can
+		// `auditctl -e 0` to disable auditing while the service stays up, so every
+		// later observation is a false zero-denial. Require auditing ENABLED (1, or
+		// 2=locked) and fail closed if it cannot be confirmed (review finding).
+		if en, _, _, ok := auditStatus(r); !ok || en < 1 {
+			return fmt.Errorf("verifier integrity lost %s: auditing is not confirmed enabled (auditctl -s enabled=%d, queryable=%v)", when, en, ok)
 		}
 		return nil
 	}
@@ -839,10 +847,15 @@ func exercise(r vm.Runner, t *target.Target, dom string) ([]avc.Denial, bool, ru
 		return nil, false, runInfo{}, fmt.Errorf("audit log stat: unexpected %q", pre)
 	}
 	offset, startInode := preFields[0], preFields[1]
-	// Snapshot the kernel audit LOSS counter. If it climbs during the window the
-	// kernel dropped audit records on buffer overflow, so a zero-denial slice is
-	// not trustworthy — the missing records could be our AVCs (review finding).
-	lost0, lostOK0 := auditLost(r)
+	// Snapshot audit status. (1) auditing must be ENABLED — a privileged script
+	// can `auditctl -e 0` while auditd the SERVICE stays active, suppressing every
+	// AVC (review finding); fail closed when it is queryable and disabled. (2) the
+	// LOSS counter: if it climbs during the window the kernel dropped records on
+	// buffer overflow, so a zero-denial slice is not trustworthy (review finding).
+	en0, lost0, _, auOK0 := auditStatus(r)
+	if auOK0 && en0 == 0 {
+		return nil, false, runInfo{}, fmt.Errorf("auditing is disabled on the verifier (auditctl -s enabled=0) — cannot observe denials; enable auditing and re-run")
+	}
 	if _, err := r.Run("sudo systemctl reset-failed " + t.Unit + " 2>/dev/null; true"); err != nil {
 		return nil, false, runInfo{}, err
 	}
@@ -873,15 +886,29 @@ func exercise(r vm.Runner, t *target.Target, dom string) ([]avc.Denial, bool, ru
 			}
 		}
 	}
-	_, _ = r.Run(fmt.Sprintf("sudo systemctl stop %s 2>/dev/null; true", t.Unit))
+	stopErr := func() error { _, e := r.Run(fmt.Sprintf("sudo systemctl stop %s", t.Unit)); return e }()
+	// The unit must actually be stopped: a still-running process could keep
+	// generating (or hide) records outside our window. Verify inactivity and fail
+	// closed rather than discarding the stop error (review finding).
+	if act, _ := r.Run(fmt.Sprintf("systemctl is-active %s", t.Unit)); hasLine(act, "active") {
+		return nil, exOK, run, fmt.Errorf("unit %s did not stop after the exercise (%s, err=%v) — cannot bound the observation window", t.Unit, strings.TrimSpace(act), stopErr)
+	}
 	// Drain barrier: the process is dead, so no NEW records are generated; give
 	// auditd's backlog a bounded chance to flush pending records to disk before we
 	// read, so a late-written AVC is not missed as a false zero-denial (review
-	// finding). Each probe is a round-trip, so no sleep is needed; best-effort.
+	// finding). Each probe is a round-trip, so no sleep is needed. If the backlog
+	// is queryable but never drains, FAIL CLOSED rather than read a partial slice.
+	backlogDrained := true
 	for i := 0; i < 5; i++ {
-		if bl, ok := auditBacklog(r); !ok || bl == 0 {
+		_, _, bl, ok := auditStatus(r)
+		if !ok || bl <= 0 {
+			backlogDrained = true
 			break
 		}
+		backlogDrained = false
+	}
+	if !backlogDrained {
+		return nil, exOK, run, fmt.Errorf("auditd backlog did not drain after the exercise — audit records may still be unwritten; re-run on a less loaded verifier")
 	}
 	// Fail closed on log rotation/truncation: a new inode or a shrunk file
 	// means our byte offset is stale and a plain tail would silently miss AVC
@@ -925,7 +952,7 @@ func exercise(r vm.Runner, t *target.Target, dom string) ([]avc.Denial, bool, ru
 	// read may be missing AVCs — a zero-denial result would be a false pass. Only
 	// enforced when both snapshots were readable (auditctl present) so a
 	// stat/audit-less environment is not spuriously blocked (review finding).
-	if lost1, lostOK1 := auditLost(r); lostOK0 && lostOK1 && lost1 > lost0 {
+	if _, lost1, _, auOK1 := auditStatus(r); auOK0 && auOK1 && lost0 >= 0 && lost1 > lost0 {
 		return nil, exOK, run, fmt.Errorf("kernel audit records were lost during the exercise (lost %d→%d) — the denial set is incomplete; re-run on a less loaded verifier", lost0, lost1)
 	}
 	for _, te := range avc.ParseTransitionErrors(out) {
@@ -971,34 +998,34 @@ func captureRunInfo(r vm.Runner, unit string) runInfo {
 	return parseRunInfo(out)
 }
 
-// auditStatusField parses one integer field ("lost", "backlog", ...) out of
-// `auditctl -s` output, which prints space- or newline-separated "key value"
-// pairs (older builds use "key=value"). Returns ok=false when auditctl cannot
-// be queried or the field is absent, so callers can skip the check rather than
-// fail on a verifier without audit tooling.
-func auditStatusField(r vm.Runner, field string) (int, bool) {
+// auditStatus parses `auditctl -s` in one call. Its output is space- or
+// newline-separated "key value" pairs (older builds use "key=value"). Fields
+// absent from the output are returned as -1; ok is false when auditctl cannot be
+// queried at all, so callers can skip (best-effort) on a verifier without audit
+// tooling while still enforcing when it IS present.
+func auditStatus(r vm.Runner) (enabled, lost, backlog int, ok bool) {
 	out, err := r.Run("sudo auditctl -s 2>/dev/null")
 	if err != nil || strings.TrimSpace(out) == "" {
-		return 0, false
+		return -1, -1, -1, false
 	}
 	f := strings.Fields(out)
-	for i, tok := range f {
-		if tok == field && i+1 < len(f) {
-			if n, e := strconv.Atoi(f[i+1]); e == nil {
-				return n, true
+	find := func(key string) int {
+		for i, tok := range f {
+			if tok == key && i+1 < len(f) {
+				if n, e := strconv.Atoi(f[i+1]); e == nil {
+					return n
+				}
+			}
+			if strings.HasPrefix(tok, key+"=") {
+				if n, e := strconv.Atoi(strings.TrimPrefix(tok, key+"=")); e == nil {
+					return n
+				}
 			}
 		}
-		if strings.HasPrefix(tok, field+"=") {
-			if n, e := strconv.Atoi(strings.TrimPrefix(tok, field+"=")); e == nil {
-				return n, true
-			}
-		}
+		return -1
 	}
-	return 0, false
+	return find("enabled"), find("lost"), find("backlog"), true
 }
-
-func auditLost(r vm.Runner) (int, bool)    { return auditStatusField(r, "lost") }
-func auditBacklog(r vm.Runner) (int, bool) { return auditStatusField(r, "backlog") }
 
 // labelType extracts the SELinux type from a user:role:type:level context so a
 // confined→unconfined transition is detected even when the binary is unchanged.

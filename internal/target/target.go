@@ -4,6 +4,7 @@ package target
 import (
 	"fmt"
 	"os"
+	"path/filepath"
 	"strings"
 
 	"gopkg.in/yaml.v3"
@@ -198,6 +199,14 @@ func Load(path string) (*Target, error) {
 		// alternation (review finding).
 		if pa.Path != root && pa.Path != root+"(/.*)?" {
 			return nil, fmt.Errorf("%s: paths[%d] (%s): unsupported file-context expression — use a literal path optionally followed by a single terminal (/.*)?", path, i, pa.Path)
+		}
+		// The literal root must be CANONICAL. `/var//lib` is not in broadSystemRoots
+		// (which lists `/var/lib`), but the kernel resolves the doubled slash and
+		// `%post restorecon` would relabel the shared tree (review finding). Reject
+		// any non-canonical root (`//`, `/./`, trailing `/`) so the broad-root and
+		// ownership checks below see the path the kernel will actually walk.
+		if filepath.Clean(root) != root {
+			return nil, fmt.Errorf("%s: paths[%d] (%s): non-canonical path root %q (resolves to %q) — declare the canonical path", path, i, pa.Path, root, filepath.Clean(root))
 		}
 		if isBroadSystemRoot(root) {
 			return nil, fmt.Errorf("%s: paths[%d] (%s): root %q is a broad system tree; declare a bounded, app-specific path", path, i, pa.Path, root)

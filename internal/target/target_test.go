@@ -175,6 +175,11 @@ func TestLoadRejectsUnownedAndInjectionPaths(t *testing.T) {
 		"/var/lib/widget(/.*)?|/etc(/.*)?",
 		"/etc/widget[a-z]*",    // non-terminal regex operators
 		"/etc/wid(get)?(/.*)?", // interior optional group
+		// Round 30: non-canonical roots — the kernel resolves the doubled slash /
+		// dot, so /var//lib bypasses the broad-root map but relabels /var/lib.
+		"/var//lib(/.*)?",
+		"/etc//widget(/.*)?",
+		"/etc/./widget(/.*)?",
 	}
 	for _, p := range bad {
 		if _, err := Load(write(t, fmt.Sprintf(pathManifest, p))); err == nil {
