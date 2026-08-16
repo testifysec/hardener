@@ -66,3 +66,13 @@ func TestSpecUpgradeReconcileFailClosedAndRollback(t *testing.T) {
 		t.Errorf("rollback must restore every old root:\n%s", spec)
 	}
 }
+
+// Round 27: a fresh RPM install must REFUSE if a module with our name already
+// exists (foreign — manual, base policy, or another package); loading ours would
+// shadow it and rollback would remove it.
+func TestSpecFreshInstallRefusesPreexistingModule(t *testing.T) {
+	spec := GenerateSpec(testTarget().Profile(), "20260101000000")
+	if !strings.Contains(spec, "semodule -l") || !strings.Contains(spec, "fresh install") {
+		t.Errorf("%%post must refuse a pre-existing module on fresh install:\n%s", spec)
+	}
+}

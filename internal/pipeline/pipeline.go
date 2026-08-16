@@ -155,7 +155,11 @@ func Run(r vm.Runner, t *target.Target, opts Options) *Result {
 	// hardening `sshd`, whose sshd_t the base policy already defines). This is
 	// the automated form of the documented "already confined" exclusion; run on
 	// a clean verifier. sesearch returns rules only for a type that exists.
-	if out, err := r.Run(fmt.Sprintf("sesearch -A -s %s -c process 2>/dev/null | head -1", dom)); err == nil && strings.TrimSpace(out) != "" {
+	nameConflict := func() bool {
+		out, err := r.Run(fmt.Sprintf("sesearch -A -s %s -c process 2>/dev/null | head -1", dom))
+		return err == nil && strings.TrimSpace(out) != ""
+	}
+	if nameConflict() {
 		return fail("name-conflict", fmt.Errorf(
 			"SELinux type %s already exists on the verifier — %s is already confined by an existing policy (or its name collides with distro policy); hardener will not shadow it. Use a distinct name or a clean verifier", dom, t.Name))
 	}
@@ -174,6 +178,15 @@ func Run(r vm.Runner, t *target.Target, opts Options) *Result {
 		if _, err := r.Run("set -e\n" + t.Setup); err != nil {
 			return fail("setup", err)
 		}
+	}
+	// Re-check for a name conflict AFTER install/setup: the vendor's own
+	// packages or setup scripts may have loaded a SELinux module that defines
+	// our domain type. The pre-install check could not see it, and proceeding
+	// would shadow or replace that module (and rollback would remove it) — refuse
+	// instead (review finding).
+	if nameConflict() {
+		return fail("name-conflict-post-install", fmt.Errorf(
+			"SELinux type %s appeared after installing %s — the artifact ships its own policy for this type; hardener will not shadow or replace it. Use a distinct name or exclude the vendor policy", dom, t.Name))
 	}
 	if _, err := r.Run("sudo systemctl daemon-reload"); err != nil {
 		return fail("daemon-reload", err)
@@ -636,17 +649,13 @@ func isAppOwnedExecutable(p *profile.Profile, path string) bool {
 	if sharedInterpreters[trimmed] {
 		return false
 	}
-	// Positive ties, strongest first:
-	// 1. a declared executable — BUT declaration alone does NOT establish
-	//    ownership for a SHARED system bin directory. Relabeling /usr/bin/curl
-	//    (merely because a manifest listed it) as the app exec type would route
-	//    every unrelated launch of curl into the app domain (review finding).
-	//    In those dirs, ownership must be earned by an app-name tie below; a
-	//    declared path in a vendor/app dir is still trusted.
-	if slices.Contains(p.Executables, path) && !inSharedBinDir(path) {
-		return true
-	}
-	// 2. under a filesystem tree the profile itself claims.
+	// Declaration ALONE is never sufficient. A manifest can list a shared system
+	// file well outside the six bin dirs — e.g. /usr/lib/systemd/system/
+	// sshd.service — and a blanket "declared and not in a bin dir → owned" rule
+	// then relabeled it as the app exec type as root (review finding). Ownership
+	// must be positively EARNED by one of the ties below, regardless of whether
+	// the path was declared. Positive ties, strongest first:
+	// 1. under a filesystem tree the profile itself claims.
 	for _, pa := range p.Paths {
 		if root := fcRoot(pa.Path); root != "" && strings.HasPrefix(path, strings.TrimRight(root, "/")+"/") {
 			return true
@@ -675,16 +684,6 @@ func isAppOwnedExecutable(p *profile.Profile, path string) bool {
 		if seg != "" && matches(seg) {
 			return true
 		}
-	}
-	return false
-}
-
-// inSharedBinDir reports whether path sits directly in a shared system binary
-// directory, where a mere declaration must not confer app ownership.
-func inSharedBinDir(path string) bool {
-	switch filepath.Dir(path) {
-	case "/usr/bin", "/bin", "/usr/sbin", "/sbin", "/usr/local/bin", "/usr/local/sbin":
-		return true
 	}
 	return false
 }

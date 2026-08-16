@@ -169,6 +169,12 @@ func TestLoadRejectsUnownedAndInjectionPaths(t *testing.T) {
 		"/etc/widget/../..(/.*)?",
 		"/var/lib/widget/../../../etc(/.*)?",
 		"relative/widget(/.*)?", // not absolute
+		// Round 27: regex alternation — literal root is /etc/widget but the
+		// expression is emitted verbatim and also matches /etc/shadow.
+		"/etc/widget(/.*)?|/etc/shadow",
+		"/var/lib/widget(/.*)?|/etc(/.*)?",
+		"/etc/widget[a-z]*",    // non-terminal regex operators
+		"/etc/wid(get)?(/.*)?", // interior optional group
 	}
 	for _, p := range bad {
 		if _, err := Load(write(t, fmt.Sprintf(pathManifest, p))); err == nil {
