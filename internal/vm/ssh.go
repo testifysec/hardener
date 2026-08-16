@@ -57,14 +57,17 @@ func (s *SSH) Run(script string) (string, error) {
 	defer cancel()
 	cmd := exec.CommandContext(ctx, "ssh", s.sshArgs()...)
 	cmd.Stdin = strings.NewReader(script)
-	out, err := cmd.CombinedOutput()
+	out, over, err := runCapped(cmd)
 	if ctx.Err() == context.DeadlineExceeded {
-		return string(out), fmt.Errorf("ssh timeout after %s", timeout)
+		return out, fmt.Errorf("ssh timeout after %s", timeout)
+	}
+	if over {
+		return out, fmt.Errorf("remote script produced more than %d bytes of output — refusing a truncated result: %w", MaxOutputBytes, errOutputTooLarge)
 	}
 	if err != nil {
-		return string(out), fmt.Errorf("remote script failed: %w\n%s", err, string(out))
+		return out, fmt.Errorf("remote script failed: %w\n%s", err, out)
 	}
-	return string(out), nil
+	return out, nil
 }
 
 func (s *SSH) WriteFile(path, content string) error {

@@ -73,3 +73,33 @@ func TestLimaRejectsOptionLikeInstance(t *testing.T) {
 		}
 	}
 }
+
+// Round 74: script output is manifest-controlled, so an unbounded CombinedOutput
+// let a target exhaust the runner's memory before the timeout fired. The buffer is
+// now capped — and on overflow we FAIL rather than truncate: callers PARSE this
+// output, most critically the audit window whose AVC records sit at the START of
+// the slice, so silently dropping the beginning would turn a denied run clean.
+func TestCappedWriterBoundsOutputAndFailsClosed(t *testing.T) {
+	w := &cappedWriter{limit: 100}
+	if n, err := w.Write([]byte(strings.Repeat("a", 60))); err != nil || n != 60 {
+		t.Fatalf("write under the limit must succeed, got n=%d err=%v", n, err)
+	}
+	if w.over {
+		t.Fatal("writer must not be marked over before the limit is exceeded")
+	}
+	// Crossing the limit must report an error (so the command is torn down) and
+	// latch `over` — never silently accept and drop data.
+	if _, err := w.Write([]byte(strings.Repeat("b", 60))); err == nil {
+		t.Error("a write crossing the limit must return an error")
+	}
+	if !w.over {
+		t.Error("the writer must latch over=true once the limit is exceeded")
+	}
+	if w.buf.Len() > w.limit {
+		t.Errorf("buffered %d bytes, must never exceed the limit %d", w.buf.Len(), w.limit)
+	}
+	// Subsequent writes keep failing rather than resuming.
+	if _, err := w.Write([]byte("c")); err == nil {
+		t.Error("writes after the limit must keep failing")
+	}
+}
