@@ -21,3 +21,26 @@ func TestSpecReconcilesWithNoPorts(t *testing.T) {
 		t.Errorf("rollback must restore pruned port mappings:\n%s", spec)
 	}
 }
+
+// Round 24 (#3): an upgrade must reconcile REMOVED file-context roots — stash
+// the old roots in %pre and restore base labels on those the new profile drops.
+func TestSpecReconcilesRemovedRoots(t *testing.T) {
+	p := &profile.Profile{Name: "widget", Paths: []profile.PathAccess{{Path: "/var/lib/widget(/.*)?", Kind: "var_lib"}}}
+	spec := GenerateSpec(p, "1")
+	if !strings.Contains(spec, "%pre") || !strings.Contains(spec, ".oldroots") {
+		t.Errorf("upgrade must stash old roots in %%pre:\n%s", spec)
+	}
+	if !strings.Contains(spec, "restore removed root") {
+		t.Errorf("%%post must reconcile removed roots:\n%s", spec)
+	}
+}
+
+// Round 24 (#4): an upgrade whose module snapshot fails must ABORT before
+// mutating anything, not proceed with a non-atomic fallback.
+func TestSpecUpgradeAbortsWithoutSnapshot(t *testing.T) {
+	p := &profile.Profile{Name: "widget", Executables: []string{"/opt/widget/bin/widgetd"}}
+	spec := GenerateSpec(p, "1")
+	if !strings.Contains(spec, "refusing a non-atomic upgrade") {
+		t.Errorf("%%post must abort if the module snapshot fails:\n%s", spec)
+	}
+}

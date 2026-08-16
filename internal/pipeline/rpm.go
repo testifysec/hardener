@@ -120,6 +120,14 @@ func GenerateSpec(p *profile.Profile, revision string) string {
 		fmt.Fprintf(&restore, "restorecon -F -- %s 2>/dev/null || echo 'warning: could not restore a %s entrypoint label after removal' >&2\n",
 			vm.ShellQuote(exe), app)
 	}
+	// rootsContent is the list of file-context roots this build labels, shipped
+	// as <app>.roots so an upgrade can detect roots REMOVED from the profile and
+	// restore their base labels (review finding).
+	var rootsContent strings.Builder
+	for _, root := range RelabelRoots(p) {
+		rootsContent.WriteString(root)
+		rootsContent.WriteString("\n")
+	}
 	return fmt.Sprintf(`Name:           %[1]s-selinux
 Version:        1.0.0
 Release:        1.%[5]s%%{?dist}
@@ -140,6 +148,17 @@ behavior, validated against the workload with SELinux Enforcing.
 %%install
 install -D -m 0644 %%{SOURCE0} %%{buildroot}%%{_datadir}/selinux/packages/%[1]s.pp
 install -D -m 0644 %%{SOURCE1} %%{buildroot}%%{_datadir}/selinux/hardener/%[1]s.fc
+mkdir -p %%{buildroot}%%{_datadir}/selinux/hardener
+cat > %%{buildroot}%%{_datadir}/selinux/hardener/%[1]s.roots <<'HARDENER_ROOTS'
+%[9]sHARDENER_ROOTS
+
+%%pre
+# On upgrade, stash the OLD roots list BEFORE the new payload overwrites it, so
+# %%post can restore base labels on roots the new profile no longer claims
+# (review finding).
+if [ "$1" -ge 2 ] && [ -f %%{_datadir}/selinux/hardener/%[1]s.roots ]; then
+    cp %%{_datadir}/selinux/hardener/%[1]s.roots /tmp/hardener-%[1]s.oldroots 2>/dev/null || :
+fi
 
 %%post
 # Fail closed WITH transactional rollback. Loading the module then failing
@@ -153,12 +172,17 @@ _ok=0
 _added=""
 _pruned=""
 # Snapshot the currently-installed module before replacing it (upgrade only).
-# Best-effort: if extraction is unavailable, _snap stays empty and we keep the
-# loaded module rather than leaving the service unconfined.
+# If the snapshot cannot be taken we ABORT before mutating anything — proceeding
+# would make a later failure non-atomic (we could not restore the prior module),
+# leaving an unverified, inconsistent policy active (review finding). This runs
+# before the trap and any change, so aborting here leaves the prior state intact.
 _snap=""
 if [ "$_op" != 1 ]; then
     _snap="$(mktemp -d 2>/dev/null || true)"
-    if [ -n "$_snap" ] && ( cd "$_snap" && semodule -E %[1]s ) 2>/dev/null; then :; else _snap=""; fi
+    if [ -z "$_snap" ] || ! ( cd "$_snap" && semodule -E %[1]s ) 2>/dev/null; then
+        echo "ERROR: could not snapshot the current %[1]s module for rollback; refusing a non-atomic upgrade" >&2
+        exit 1
+    fi
 fi
 _rollback() {
     [ "$_ok" = 1 ] && return 0
@@ -177,7 +201,7 @@ _rollback() {
 %[6]s
         for _row in $_pruned; do _rp=${_row%%%%:*}; _rn=${_row##*:}; semanage port -a -t %[7]s -p "$_rp" "$_rn" 2>/dev/null || :; done
     fi
-    # (Upgrade with no snapshot: keep the loaded module — never leave none.)
+    # (On upgrade $_snap is always set — we abort above if the snapshot fails.)
 }
 trap _rollback EXIT
 # Reconcile ports BEFORE loading the new module (a mapping to a type the new
@@ -187,6 +211,19 @@ trap _rollback EXIT
     exit 1
 fi
 %[2]s%[3]s_ok=1
+
+# Reconcile REMOVED file-context roots: any root the previous install labeled
+# that the new profile no longer claims is restored to its base label — else the
+# files keep a now-undeclared app type or a dangling one (review finding). Runs
+# only after a successful load/label.
+if [ -f /tmp/hardener-%[1]s.oldroots ]; then
+    _newroots="$(cat %%{_datadir}/selinux/hardener/%[1]s.roots 2>/dev/null)"
+    while IFS= read -r _oldroot; do
+        [ -n "$_oldroot" ] || continue
+        printf '%%s\n' "$_newroots" | grep -qxF "$_oldroot" || restorecon -RF -- "$_oldroot" 2>/dev/null || echo "warning: could not restore removed root $_oldroot" >&2
+    done < /tmp/hardener-%[1]s.oldroots
+    rm -f /tmp/hardener-%[1]s.oldroots
+fi
 
 %%postun
 if [ $1 -eq 0 ]; then
@@ -199,5 +236,6 @@ fi
 %%files
 %%{_datadir}/selinux/packages/%[1]s.pp
 %%{_datadir}/selinux/hardener/%[1]s.fc
-`, app, relabel.String(), ports.String(), portsDel.String(), revision, restore.String(), appPortType, reconcile)
+%%{_datadir}/selinux/hardener/%[1]s.roots
+`, app, relabel.String(), ports.String(), portsDel.String(), revision, restore.String(), appPortType, reconcile, rootsContent.String())
 }

@@ -154,3 +154,26 @@ func TestVerdictDisclosesBaseGrants(t *testing.T) {
 		t.Errorf("base grants must include shell execution: %v", st.Predicate.Coverage.BaseGrants)
 	}
 }
+
+// Round 24: undeclared behavior for a first/second-party artifact must fail
+// closed even if the ConformanceFatal summary string was never set (the two
+// could disagree and pass).
+func TestVerdictFailsOnUndeclaredWithoutFatal(t *testing.T) {
+	r := passingResult()
+	r.RPMPath = ""
+	r.Party = "second"
+	r.ConformanceUndecl = []string{"capability setuid"}
+	r.ConformanceFatal = "" // inconsistent: undeclared set, fatal empty
+	st, err := BuildOrErr(r, Env{}, nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if st.Predicate.Verdict != "fail" {
+		t.Errorf("undeclared second-party behavior must fail closed, got %q", st.Predicate.Verdict)
+	}
+	// A THIRD-party artifact's undeclared behavior stays advisory (not fatal).
+	r.Party = "third"
+	if st, _ := BuildOrErr(r, Env{}, []Subject{{Name: "x", SHA256: goodSHA}}); st.Predicate.Verdict == "fail" {
+		t.Error("third-party undeclared behavior is advisory, must not fail")
+	}
+}
