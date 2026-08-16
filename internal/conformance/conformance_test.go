@@ -258,3 +258,23 @@ func TestBindKeyDistinguishesProtocol(t *testing.T) {
 		t.Errorf("undeclared udp bind must be flagged, got %+v", rep.Undeclared)
 	}
 }
+
+// Round 38: the first-party caddy baseline must declare the SAME base_grants the
+// generated domain unconditionally receives (policy.BaseInterfaces), or the
+// unchanged party-first-caddy target reports drift and fails. This keeps the
+// committed baseline in sync if BaseInterfaces ever changes.
+func TestCaddyBaselineDeclaresBaseGrants(t *testing.T) {
+	decl, err := LoadDeclaration("../../targets/baselines/caddy.yaml")
+	if err != nil {
+		t.Fatalf("load caddy baseline: %v", err)
+	}
+	got := toSet(decl.BaseGrants)
+	for _, g := range policy.BaseInterfaces {
+		if !got[g] {
+			t.Errorf("caddy baseline is missing base grant %q (declared %v)", g, decl.BaseGrants)
+		}
+	}
+	if len(decl.BaseGrants) != len(policy.BaseInterfaces) {
+		t.Errorf("caddy baseline base_grants count %d != BaseInterfaces %d", len(decl.BaseGrants), len(policy.BaseInterfaces))
+	}
+}

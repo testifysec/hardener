@@ -262,8 +262,9 @@ _rollback() {
         # Re-apply the PREVIOUS module's labels on ALL of its roots — including
         # any removed root already reset to base before the failure — so the
         # reinstated old module and the on-disk labels are consistent (review
-        # finding). Restoring only the new profile's roots (%[6]s above) would
-        # leave already-restored removed roots mislabeled under the old module.
+        # finding). Restoring only the new profile's roots (the base-label restore
+        # above) would leave already-restored removed roots mislabeled under the
+        # old module.
         if [ -f %%{_datadir}/selinux/hardener/%[1]s.oldroots ]; then
             while IFS= read -r _oldroot; do
                 [ -n "$_oldroot" ] || continue

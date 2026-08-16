@@ -1,6 +1,7 @@
 package pipeline
 
 import (
+	"os/exec"
 	"strings"
 	"testing"
 
@@ -372,5 +373,83 @@ func TestRunDetectsModuleNameConflict(t *testing.T) {
 	res := Run(f, testTarget(), Options{MaxRounds: 2})
 	if !strings.Contains(res.FailureReason, "name-conflict") && !strings.Contains(res.FailureReason, "already exists") {
 		t.Errorf("an existing module named <app> must be a conflict, got %q", res.FailureReason)
+	}
+}
+
+// Round 38: a stray %[N]s inside a comment was expanded by fmt.Sprintf into
+// multiline shell, breaking %post. The generated scriptlets must contain no
+// unexpanded format placeholder AND must be valid bash.
+func TestSpecScriptletsAreValidBash(t *testing.T) {
+	p := &profile.Profile{
+		Name:        "widget",
+		Executables: []string{"/opt/widget/bin/widgetd"},
+		Paths:       []profile.PathAccess{{Path: "/var/lib/widget(/.*)?", Kind: "var_lib"}, {Path: "/etc/widget(/.*)?", Kind: "conf"}},
+		Ports:       []profile.Port{{Proto: "tcp", Port: 8443}},
+	}
+	spec := GenerateSpec(p, "1")
+	if strings.Contains(spec, "%[") {
+		t.Errorf("spec contains an unexpanded format placeholder %%[...]s:\n%s", spec)
+	}
+	// Extract each scriptlet body and syntax-check it with `bash -n`.
+	for _, sect := range []string{"%pre", "%post", "%postun"} {
+		body := scriptletBody(spec, sect)
+		if strings.TrimSpace(body) == "" {
+			continue
+		}
+		cmd := exec.Command("bash", "-n")
+		cmd.Stdin = strings.NewReader(body)
+		if out, err := cmd.CombinedOutput(); err != nil {
+			t.Errorf("%s scriptlet is not valid bash: %v\n%s\n---body---\n%s", sect, err, out, body)
+		}
+	}
+}
+
+// scriptletBody returns the lines of an rpm spec section (e.g. "%post") up to
+// the next top-level %section header, with rpm macros neutralized so `bash -n`
+// parses only the shell.
+func scriptletBody(spec, header string) string {
+	lines := strings.Split(spec, "\n")
+	var body []string
+	in := false
+	sections := map[string]bool{"%pre": true, "%post": true, "%postun": true, "%preun": true, "%install": true, "%files": true, "%description": true, "%build": true, "%prep": true, "%posttrans": true}
+	for _, ln := range lines {
+		trimmed := strings.TrimSpace(ln)
+		first := strings.Fields(trimmed)
+		if len(first) > 0 && sections[first[0]] {
+			in = first[0] == header
+			continue
+		}
+		if in {
+			// Neutralize rpm macros so bash -n sees a plain token, not %{...}.
+			body = append(body, strings.NewReplacer("%{", "${RPM_", "}", "}").Replace(ln))
+		}
+	}
+	return strings.Join(body, "\n")
+}
+
+// Round 38: nameConflict must FAIL CLOSED if `semodule -l` cannot enumerate —
+// we can't otherwise rule out an existing same-name module.
+func TestRunFailsClosedWhenSemoduleListFails(t *testing.T) {
+	f := passingRunner()
+	f.failOn = []string{"semodule -l"}
+	res := Run(f, testTarget(), Options{MaxRounds: 2})
+	if !strings.Contains(res.FailureReason, "cannot enumerate SELinux modules") {
+		t.Errorf("a semodule -l failure must fail closed, got %q", res.FailureReason)
+	}
+}
+
+// Round 38: a run that fails at enforcement (EnforceOK false) must still roll
+// back the verifier's generated state, not fall through the RPM-build skip.
+func TestRunCleansVerifierStateOnEnforceFailure(t *testing.T) {
+	f := passingRunner()
+	// Residual denial under enforcement that refinement cannot silence: a denial
+	// on a forbidden target keeps EnforceOK false across attempts.
+	f.responses["tail -c"] = "type=AVC msg=audit(1): avc: denied { write } for pid=1 comm=\"widgetd\" scontext=system_u:system_r:widget_t:s0 tcontext=system_u:object_r:shadow_t:s0 tclass=file permissive=0"
+	res := Run(f, testTarget(), Options{MaxRounds: 2})
+	if res.EnforceOK {
+		t.Skip("expected enforcement to fail for this fixture")
+	}
+	if f.countCalls("semodule -r widget") == 0 {
+		t.Error("an enforcement failure must roll back the generated module (semodule -r)")
 	}
 }

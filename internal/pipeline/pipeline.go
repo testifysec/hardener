@@ -200,11 +200,16 @@ func Run(r vm.Runner, t *target.Target, opts Options) *Result {
 		// replaces by MODULE NAME, so it would silently overwrite that module even
 		// though our <app>_t type check finds nothing — removing real confinement
 		// (review finding). Check the module list by name too.
-		if modlist, merr := r.Run("sudo semodule -l 2>/dev/null"); merr == nil {
-			for _, line := range strings.Split(modlist, "\n") {
-				if f := strings.Fields(line); len(f) > 0 && f[0] == appMod {
-					return true, nil // a module named <app> already exists → conflict
-				}
+		modlist, merr := r.Run("sudo semodule -l 2>/dev/null")
+		if merr != nil {
+			// FAIL CLOSED: if we cannot enumerate modules we cannot rule out an
+			// existing same-name module that our `semodule -i` would overwrite
+			// (review finding — the failure was previously ignored).
+			return false, fmt.Errorf("cannot enumerate SELinux modules (semodule -l failed): %w — refusing to risk overwriting an existing module", merr)
+		}
+		for _, line := range strings.Split(modlist, "\n") {
+			if f := strings.Fields(line); len(f) > 0 && f[0] == appMod {
+				return true, nil // a module named <app> already exists → conflict
 			}
 		}
 		out, err := r.Run(fmt.Sprintf("seinfo -t %s 2>/dev/null", dom))
@@ -693,6 +698,15 @@ func Run(r vm.Runner, t *target.Target, opts Options) *Result {
 			return fail("rpm-digest", fmt.Errorf("sha256sum %s: %v", rpm, err))
 		}
 		res.RPMSHA256 = fields[0]
+	}
+	// Enforcement can finish with EnforceOK==false (residual denials, no domain
+	// proof) and fall through here WITHOUT going via fail(), leaving the module,
+	// ports, and labels on the persistent verifier (review finding). Route every
+	// unsuccessful result through cleanup. Clear permissive FIRST so we never
+	// remove a module a permissive entry still references.
+	if res.IsFailure() {
+		_ = clearPermissive()
+		cleanupVerifierState()
 	}
 	return res
 }
