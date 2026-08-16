@@ -66,6 +66,12 @@ func GenerateSpec(p *profile.Profile, revision string) string {
 		// printf '%%s' prints it literally.
 		fmt.Fprintf(&relabel,
 			"_e=%[1]s\n"+
+				// Refuse to relabel a HARD-LINKED entrypoint: restorecon changes the
+				// inode's label, so a shared inode (link count > 1, e.g. hard-linked to
+				// /usr/bin/bash) would relabel every other link into <app>_exec_t on the
+				// CUSTOMER host too — the verifier-side check alone is not enough (review
+				// finding). Privileged stat at %post; any non-1 or unstattable count fails.
+				"_lc=$(stat -c '%%h' -- \"$_e\" 2>/dev/null); case \"$_lc\" in 1) : ;; *) printf 'ERROR: entrypoint %%s has hard-link count %%s (want exactly 1); refusing to relabel a shared inode\\n' \"$_e\" \"$_lc\" >&2; exit 1 ;; esac\n"+
 				"restorecon -F -- \"$_e\" || { printf 'ERROR: cannot label entrypoint %%s; the service would run unconfined\\n' \"$_e\" >&2; exit 1; }\n"+
 				"_lbl=$(stat -c '%%C' -- \"$_e\" 2>/dev/null); case \"$_lbl\" in *:%[2]s:*) : ;; *) printf 'ERROR: entrypoint %%s is labeled %%s, not %[2]s — a higher-priority file-context rule is overriding it; the service would run unconfined\\n' \"$_e\" \"$_lbl\" >&2; exit 1 ;; esac\n",
 			vm.ShellQuote(exe), execType)
