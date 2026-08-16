@@ -32,6 +32,11 @@ executables:
   - "/usr/lib/plexmediaserver/Plex Script Host"
   - "/usr/lib/plexmediaserver/Plex Media Scanner"
   - "/usr/lib/plexmediaserver/Plex Tuner Service"
+  # Plex Media Server fork/execs this patched-ffmpeg helper for EVERY transcode.
+  # Omitting it left the transcoder's execution uncaptured: the policy never
+  # labels it plex_exec_t, so the domain transition never fires and transcoding
+  # breaks under enforcement (review finding — round 64).
+  - "/usr/lib/plexmediaserver/Plex Transcoder"
 paths:
   # plexmediaserver is Plex's vendor directory; its name shares only a
   # non-boundary prefix with "plex", so ownership is asserted explicitly.
@@ -47,3 +52,10 @@ exercise: |
   done
   [ "$ok" = "1" ]
   grep -q machineIdentifier /tmp/plex.out
+  # Exercise the transcoder helper so its execve + runtime denials surface during
+  # observation. Plex normally fork/execs it per transcode, but that needs media +
+  # an auth token; invoking it directly still drives the plex_exec_t transition and
+  # the binary's own file/lib accesses under enforcement. It links Plex's bundled
+  # libs, so point the loader there; the patched ffmpeg prints its banner and exits 0.
+  sudo -u plex env LD_LIBRARY_PATH=/usr/lib/plexmediaserver/lib "/usr/lib/plexmediaserver/Plex Transcoder" -version > /tmp/plex.xcode 2>&1
+  grep -qi 'ffmpeg\|plex transcoder' /tmp/plex.xcode

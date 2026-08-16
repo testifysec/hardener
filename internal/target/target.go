@@ -272,6 +272,16 @@ func Load(path string) (*Target, error) {
 		}) {
 			return nil, fmt.Errorf("%s: paths[%d]: path contains whitespace or a control character (file-context field injection)", path, i)
 		}
+		// Reject '%'. GenerateSpec interpolates this path into the RPM spec —
+		// including %post scriptlet bodies and the HARDENER_ROOTS heredoc — and
+		// rpmbuild expands %{...} and %(...) macros throughout the spec BEFORE the
+		// shell runs. ShellQuote guards the shell, not rpmbuild, so a path like
+		// /opt/plex%(id)/data would execute a command at build time or expand a
+		// macro, making the signed RPM diverge from the verified policy. No
+		// legitimate filesystem path contains '%' (review finding — round 64).
+		if strings.ContainsRune(pa.Path, '%') {
+			return nil, fmt.Errorf("%s: paths[%d] (%s): path contains '%%' — rpmbuild would macro-expand it in the generated spec; declare a path without '%%'", path, i, pa.Path)
+		}
 		// Reject path traversal. A regex like /etc/widget/../..(/.*)? passes the
 		// textual ownership and broad-root checks, but its literal root
 		// /etc/widget/../.. resolves through `restorecon -RF` to / and relabels
@@ -361,6 +371,15 @@ func Load(path string) (*Target, error) {
 		}
 		if strings.ContainsFunc(exe, unicode.IsControl) {
 			return nil, fmt.Errorf("%s: executables[%d]: contains a control character (newline/tab/NUL)", path, i)
+		}
+		// Reject '%' for the same reason as paths: GenerateSpec interpolates each
+		// executable into the %post scriptlet, and rpmbuild macro-expands %{...} and
+		// %(...) before the shell runs. Spaces are allowed (vendor binaries like
+		// "Plex Media Server") but '%' never appears in a legitimate binary path and
+		// would let rpmbuild execute a command or expand a macro at build time,
+		// diverging the signed RPM from the verified policy (review finding — round 64).
+		if strings.ContainsRune(exe, '%') {
+			return nil, fmt.Errorf("%s: executables[%d] (%s): contains '%%' — rpmbuild would macro-expand it in the generated %%post spec; declare a path without '%%'", path, i, exe)
 		}
 		if filepath.Clean(exe) != exe {
 			return nil, fmt.Errorf("%s: executables[%d] (%s): non-canonical path (resolves to %q) — declare the canonical path", path, i, exe, filepath.Clean(exe))
