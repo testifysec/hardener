@@ -96,6 +96,7 @@ func TestBailsWhenPermissiveExerciseFailsWithNoDenials(t *testing.T) {
 		responses: map[string]string{
 			"getenforce":               "Enforcing\nactive",
 			"stat -c '%s %i'":          "0 4242",
+			"stat -c '%s'":             "0",
 			"stat -c '%i'":             "4242",
 			"stat -c %h":               "1",
 			"auditctl -s":              "enabled 1 lost 0 backlog 0",

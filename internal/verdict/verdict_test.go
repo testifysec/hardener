@@ -35,7 +35,10 @@ func passingResult() *pipeline.Result {
 }
 
 func TestBuildStatementShape(t *testing.T) {
-	st := Build(passingResult(), Env{Distro: "AlmaLinux 9.8", Kernel: "5.14.0", Mode: "Enforcing", PolicyPackage: "selinux-policy-38"},
+	r := passingResult()
+	r.RPMPath = "/home/u/rpmbuild/RPMS/noarch/widget-selinux-1.0.0-1.el9.noarch.rpm"
+	r.RPMSHA256 = "abababababababababababababababababababababababababababababababab"
+	st := Build(r, Env{Distro: "AlmaLinux 9.8", Kernel: "5.14.0", Mode: "Enforcing", PolicyPackage: "selinux-policy-38"},
 		[]Subject{{Name: "widget-selinux-1.0.0-1.el9.noarch.rpm", SHA256: "abababababababababababababababababababababababababababababababab"}})
 
 	if st.Type != "https://in-toto.io/Statement/v1" {

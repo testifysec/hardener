@@ -156,14 +156,30 @@ func BuildOrErr(res *pipeline.Result, env Env, extra []Subject) (Statement, erro
 		return Statement{}, fmt.Errorf("inconsistent party: signed target says %q but conformance says %q", res.Target.Party, res.Party)
 	}
 	subjects := make([]wireSubject, 0, len(extra)+4)
+	seenNames := map[string]bool{}
 	add := func(name, digest string) error {
 		if !sha256Re.MatchString(digest) {
 			return fmt.Errorf("subject %q: invalid sha256 digest %q (want 64 lowercase hex)", name, digest)
 		}
+		if seenNames[name] {
+			return fmt.Errorf("duplicate subject name %q — refusing an ambiguous attestation", name)
+		}
+		seenNames[name] = true
 		subjects = append(subjects, wireSubject{Name: name, Digest: map[string]string{"sha256": digest}})
 		return nil
 	}
+	// The ONLY authoritative extra subject is the built RPM. An arbitrary caller-
+	// provided extra would otherwise be certified under a passing entrypoint-bound
+	// verdict, letting the attestation vouch for an unrelated artifact (review
+	// finding). Every extra must match the built RPM's name AND its computed digest.
+	wantRPM := ""
+	if res.RPMPath != "" {
+		wantRPM = RPMSubjectName(res.RPMPath)
+	}
 	for _, s := range extra {
+		if wantRPM == "" || s.Name != wantRPM || s.SHA256 != res.RPMSHA256 {
+			return Statement{}, fmt.Errorf("extra subject %q@%s is not the built RPM (%q@%s) — refusing to certify an unrelated artifact", s.Name, s.SHA256, wantRPM, res.RPMSHA256)
+		}
 		if err := add(s.Name, s.SHA256); err != nil {
 			return Statement{}, err
 		}
