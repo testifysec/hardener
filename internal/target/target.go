@@ -348,6 +348,7 @@ func Load(path string) (*Target, error) {
 	// metacharacters into install-time execution — and an unsupported protocol
 	// is silently dropped from the TE socket rules (review finding). Constrain
 	// them here: exactly tcp or udp, and a port in 1–65535.
+	seenPort := map[string]bool{}
 	for i, po := range t.Ports {
 		if po.Proto != "tcp" && po.Proto != "udp" {
 			return nil, fmt.Errorf("%s: ports[%d]: protocol must be tcp or udp (got %q)", path, i, po.Proto)
@@ -355,6 +356,19 @@ func Load(path string) (*Target, error) {
 		if po.Port < 1 || po.Port > 65535 {
 			return nil, fmt.Errorf("%s: ports[%d]: port must be 1–65535 (got %d)", path, i, po.Port)
 		}
+		// Reject a DUPLICATE (proto, port). %postun captures the port listing ONCE
+		// and tests every declared entry against that stale snapshot, so a duplicate
+		// matches again after the first deletion already removed the mapping; the
+		// second `semanage port -d` then fails, and the fail-closed handler aborts
+		// %postun BEFORE `semodule -r` and the label restore — an RPM erase that
+		// leaves the module and stale labels behind (review finding — round 70).
+		// Reject at load rather than silently deduplicating: a repeated port is an
+		// authoring error, and this keeps the deletion path strictly fail-closed.
+		key := fmt.Sprintf("%s/%d", po.Proto, po.Port)
+		if seenPort[key] {
+			return nil, fmt.Errorf("%s: ports[%d]: duplicate port %d/%s — declare each protocol/port exactly once", path, i, po.Port, po.Proto)
+		}
+		seenPort[key] = true
 	}
 	// Every executable is relabeled as the app exec type and interpolated into
 	// %post shell, so validate path-safety: absolute, canonical (no ".." or

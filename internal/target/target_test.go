@@ -576,3 +576,43 @@ paths:
 		t.Errorf("an exact duplicate path+kind is idempotent, must load: %v", err)
 	}
 }
+
+// Round 70: a duplicate (proto, port) must be rejected at load. %postun tests
+// every declared entry against ONE stale `semanage port -l` snapshot, so the
+// second copy still matches after the first deletion removed the mapping; the
+// repeated `semanage port -d` then fails and the fail-closed handler aborts the
+// uninstall before `semodule -r` and the label restore, leaving the module and
+// stale labels behind after an RPM erase. (review finding)
+func TestLoadRejectsDuplicatePorts(t *testing.T) {
+	m := `name: widget
+install: "true"
+unit: widget.service
+exercise: "true"
+executables:
+  - /opt/widget/bin/widgetd
+ports:
+  - { proto: tcp, port: 8443 }
+  - { proto: tcp, port: 8443 }
+`
+	_, err := Load(write(t, m))
+	if err == nil {
+		t.Fatal("a duplicate proto/port must be rejected")
+	}
+	if !strings.Contains(err.Error(), "duplicate port") {
+		t.Errorf("expected a duplicate-port rejection, got: %v", err)
+	}
+	// Same port number on a DIFFERENT protocol is legitimate and must load.
+	ok := `name: widget
+install: "true"
+unit: widget.service
+exercise: "true"
+executables:
+  - /opt/widget/bin/widgetd
+ports:
+  - { proto: tcp, port: 8443 }
+  - { proto: udp, port: 8443 }
+`
+	if _, err := Load(write(t, ok)); err != nil {
+		t.Errorf("tcp and udp on the same port number must load: %v", err)
+	}
+}
