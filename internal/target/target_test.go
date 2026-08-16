@@ -164,6 +164,11 @@ func TestLoadRejectsUnownedAndInjectionPaths(t *testing.T) {
 		// they must be rejected unless explicitly vouched for with owned: true.
 		"/usr/lib/widgetsrv(/.*)?",
 		"/opt/widgetd/data(/.*)?",
+		// Round 26: path traversal — the literal root resolves through
+		// restorecon to a broad tree (/etc/widget/../.. -> /).
+		"/etc/widget/../..(/.*)?",
+		"/var/lib/widget/../../../etc(/.*)?",
+		"relative/widget(/.*)?", // not absolute
 	}
 	for _, p := range bad {
 		if _, err := Load(write(t, fmt.Sprintf(pathManifest, p))); err == nil {

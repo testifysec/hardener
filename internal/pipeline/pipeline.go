@@ -813,17 +813,27 @@ func exercise(r vm.Runner, t *target.Target, dom string) ([]avc.Denial, bool, ru
 	var run runInfo
 	if exOK {
 		// Capture the label AND the running binary (resolved path + digest) from
-		// the SAME MainPID, in one shot while the service is up — the service is
-		// stopped below, so /proc/$pid/exe is gone afterward.
-		out, _ := r.Run(fmt.Sprintf(
-			`pid=$(systemctl show -p MainPID --value %s); if [ "$pid" -gt 0 ] 2>/dev/null; then `+
-				`printf 'LABEL:%%s\n' "$(ps -o label= -p "$pid")"; `+
-				`printf 'EXE:%%s\n' "$(sudo readlink -f /proc/$pid/exe 2>/dev/null)"; `+
-				`printf 'EXESHA:%%s\n' "$(sudo sha256sum /proc/$pid/exe 2>/dev/null | awk '{print $1}')"; `+
-				`else echo NO_PID; fi`, t.Unit))
-		run = parseRunInfo(out)
+		// the SAME MainPID while the service is up.
+		run = captureRunInfo(r, t.Unit)
 		_, exErr := r.Run("set -e\n" + t.Exercise)
 		exOK = exErr == nil
+		// TOCTOU: `run` was captured right after restart, BEFORE the scenario. If
+		// the exercise restarted or re-exec'd the service into different bytes or
+		// an unconfined context, binding the verdict to the pre-exercise capture
+		// would attest a process that did not do the work (review finding).
+		// Re-capture after the scenario; if a MainPID is still present and its
+		// (domain, exe, digest) changed, fail closed. A same-identity restart
+		// (new pid, same binary/label/digest) is benign; a clean stop by the
+		// scenario (no pid) leaves the pre-capture authoritative.
+		if exOK {
+			if after := captureRunInfo(r, t.Unit); after.ExePath != "" &&
+				(after.ExePath != run.ExePath || after.ExeDigest != run.ExeDigest ||
+					labelType(after.Label) != labelType(run.Label)) {
+				return nil, false, run, fmt.Errorf(
+					"the exercised process changed identity mid-run (before exe=%s sha=%s label=%s; after exe=%s sha=%s label=%s) — the verdict cannot bind a single executed image",
+					run.ExePath, run.ExeDigest, run.Label, after.ExePath, after.ExeDigest, after.Label)
+			}
+		}
 	}
 	_, _ = r.Run(fmt.Sprintf("sudo systemctl stop %s 2>/dev/null; true", t.Unit))
 	// Fail closed on log rotation/truncation: a new inode or a shrunk file
@@ -892,6 +902,29 @@ func sortedKeys(m map[string]string) []string {
 	}
 	sort.Strings(ks)
 	return ks
+}
+
+// captureRunInfo reads the unit's MainPID and returns that process's SELinux
+// label plus the resolved path and digest of its running binary, in one shot
+// while the service is up. An absent PID yields a zero runInfo.
+func captureRunInfo(r vm.Runner, unit string) runInfo {
+	out, _ := r.Run(fmt.Sprintf(
+		`pid=$(systemctl show -p MainPID --value %s); if [ "$pid" -gt 0 ] 2>/dev/null; then `+
+			`printf 'LABEL:%%s\n' "$(ps -o label= -p "$pid")"; `+
+			`printf 'EXE:%%s\n' "$(sudo readlink -f /proc/$pid/exe 2>/dev/null)"; `+
+			`printf 'EXESHA:%%s\n' "$(sudo sha256sum /proc/$pid/exe 2>/dev/null | awk '{print $1}')"; `+
+			`else echo NO_PID; fi`, unit))
+	return parseRunInfo(out)
+}
+
+// labelType extracts the SELinux type from a user:role:type:level context so a
+// confined→unconfined transition is detected even when the binary is unchanged.
+func labelType(label string) string {
+	parts := strings.Split(strings.TrimSpace(label), ":")
+	if len(parts) >= 3 {
+		return parts[2]
+	}
+	return strings.TrimSpace(label)
 }
 
 // parseRunInfo pulls the LABEL/EXE/EXESHA lines out of the capture command's

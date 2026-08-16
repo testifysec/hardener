@@ -176,6 +176,19 @@ func Load(path string) (*Target, error) {
 		if strings.ContainsAny(pa.Path, "\n\r\x00") {
 			return nil, fmt.Errorf("%s: paths[%d]: path contains a newline or control character (file-context injection)", path, i)
 		}
+		// Reject path traversal. A regex like /etc/widget/../..(/.*)? passes the
+		// textual ownership and broad-root checks, but its literal root
+		// /etc/widget/../.. resolves through `restorecon -RF` to / and relabels
+		// the whole host (review finding). A file-context root must be an
+		// absolute path with no ".." component.
+		if !strings.HasPrefix(pa.Path, "/") {
+			return nil, fmt.Errorf("%s: paths[%d] (%s): path must be absolute", path, i, pa.Path)
+		}
+		for _, seg := range strings.Split(pa.Path, "/") {
+			if seg == ".." {
+				return nil, fmt.Errorf("%s: paths[%d] (%s): path traversal ('..') is not allowed — declare a bounded, canonical path", path, i, pa.Path)
+			}
+		}
 		root := literalRoot(pa.Path)
 		if isBroadSystemRoot(root) {
 			return nil, fmt.Errorf("%s: paths[%d] (%s): root %q is a broad system tree; declare a bounded, app-specific path", path, i, pa.Path, root)
