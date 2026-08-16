@@ -422,6 +422,20 @@ func Run(r vm.Runner, t *target.Target, opts Options) *Result {
 		}
 	}
 
+	// Install the FINAL accumulated policy before enforcement. The observe loop
+	// installs at the START of each round, so any rules discovered in the LAST
+	// round (including when convergence lands exactly on MaxRounds) were merged
+	// into extraRules but never installed. Enforcement would then rediscover
+	// them as denials, mergeNewRules would report zero new progress, and the
+	// enforce loop would give up without ever installing them — failing on rules
+	// we already know (review finding).
+	finalTE := policy.GenerateTE(p) + policy.RenderRefinedSection(p, extraRules)
+	finalFC := policy.GenerateFC(p)
+	if err := installPolicy(r, p, finalTE, finalFC); err != nil {
+		return fail("final-policy-install", err)
+	}
+	res.FinalTE, res.FinalFC = finalTE, finalFC
+
 	// The verifier itself must still be trustworthy after running the
 	// artifact's privileged install/setup/exercise scripts: a malicious
 	// package could have run setenforce 0 or stopped auditd, making every

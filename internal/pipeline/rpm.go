@@ -70,22 +70,39 @@ func GenerateSpec(p *profile.Profile, revision string) string {
 				"_lbl=$(stat -c '%%C' -- \"$_e\" 2>/dev/null); case \"$_lbl\" in *:%[2]s:*) : ;; *) printf 'ERROR: entrypoint %%s is labeled %%s, not %[2]s — a higher-priority file-context rule is overriding it; the service would run unconfined\\n' \"$_e\" \"$_lbl\" >&2; exit 1 ;; esac\n",
 			vm.ShellQuote(exe), execType)
 	}
+	appPortType := policy.PortType(p.Name)
 	var ports strings.Builder
 	var portsDel strings.Builder
-	for _, port := range p.Ports {
-		// Fail CLOSED on the port label: `-a` succeeds on first install and
-		// fails on re-install (already defined) OR on a conflict (the port is
-		// claimed by ANOTHER type). Distinguish them by verifying the port is
-		// actually listed under our type — otherwise `|| :` silently left the
-		// service binding an unintended port type (review finding). proto/port
-		// are validated at manifest load, so they are safe to interpolate.
+	if len(p.Ports) > 0 {
+		// (#6) Reconcile: prune any mapping under OUR port type that is NOT in
+		// the current profile. An upgrade that dropped a port would otherwise
+		// leave the stale mapping — undeclared bind privilege, or a dangling
+		// reference when the type disappears. Only ever touches <app>_port_t.
+		var desired strings.Builder
+		for _, port := range p.Ports {
+			fmt.Fprintf(&desired, " %s:%d", port.Proto, port.Port)
+		}
 		fmt.Fprintf(&ports,
-			"if ! { semanage port -a -t %[1]s -p %[2]s %[3]d 2>/dev/null || semanage port -l | awk -v t=%[1]s -v p=%[2]s '$1==t && $2==p' | grep -qw %[3]d; }; then echo \"ERROR: port %[3]d/%[2]s could not be assigned to %[1]s (already claimed by another SELinux type?); refusing to leave %[1]s bound to an unintended port type\" >&2; exit 1; fi\n",
-			policy.PortType(p.Name), port.Proto, port.Port)
-		// Removal is best-effort but OBSERVABLE — a swallowed `|| :` hid a
-		// half-removed policy on uninstall (review finding).
+			"_desired=\"%[2]s \"\n"+
+				"for _row in $(semanage port -l | awk '$1==\"%[1]s\"{for(i=3;i<=NF;i++){gsub(\",\",\"\",$i); print $2\":\"$i}}'); do "+
+				"case \"$_desired\" in *\" $_row \"*) : ;; "+
+				"*) _pp=${_row%%%%:*}; _pn=${_row##*:}; semanage port -d -t %[1]s -p \"$_pp\" \"$_pn\" 2>/dev/null || echo \"warning: could not prune stale port $_row from %[1]s\" >&2 ;; esac; done\n",
+			appPortType, desired.String())
+	}
+	for _, port := range p.Ports {
+		// (#5) Add + verify, and RECORD only the ports we actually added
+		// (_added). Rollback then removes exactly this transaction's additions
+		// and never a pre-existing mapping owned by another service (-t is not an
+		// ownership guard). Still fail CLOSED if the port cannot land under our
+		// type. proto/port are validated at manifest load — safe to interpolate.
+		fmt.Fprintf(&ports,
+			"if semanage port -a -t %[1]s -p %[2]s %[3]d 2>/dev/null; then _added=\"$_added %[2]s:%[3]d\"; "+
+				"elif ! semanage port -l | awk -v t=%[1]s -v p=%[2]s '$1==t && $2==p' | grep -qw %[3]d; then "+
+				"echo \"ERROR: port %[3]d/%[2]s could not be assigned to %[1]s (already claimed by another SELinux type?); refusing to leave %[1]s bound to an unintended port type\" >&2; exit 1; fi\n",
+			appPortType, port.Proto, port.Port)
+		// Full removal for %postun, observable (round-18 finding).
 		fmt.Fprintf(&portsDel, "semanage port -d -t %[1]s -p %[2]s %[3]d 2>/dev/null || echo \"warning: could not remove port %[3]d/%[2]s mapping for %[1]s\" >&2\n",
-			policy.PortType(p.Name), port.Proto, port.Port)
+			appPortType, port.Proto, port.Port)
 	}
 	// After the module is removed on uninstall, the app's files still carry the
 	// now-UNDEFINED app types (<app>_exec_t, etc.) — leaving them labeled makes
@@ -133,10 +150,16 @@ install -D -m 0644 %%{SOURCE1} %%{buildroot}%%{_datadir}/selinux/hardener/%[1]s.
 # still reported via the non-zero exit (review finding).
 _op=$1
 _ok=0
+_added=""
 _rollback() {
     [ "$_ok" = 1 ] && return 0
+    # Remove ONLY the port mappings THIS transaction added (tracked in _added),
+    # never a pre-existing mapping owned by another service (review finding).
+    for _row in $_added; do _rp=${_row%%%%:*}; _rn=${_row##*:}; semanage port -d -t %[7]s -p "$_rp" "$_rn" 2>/dev/null || :; done
+    # The module is only torn down on a FRESH install ($1 == 1); an upgrade keeps
+    # the loaded module rather than leaving the service with none.
     [ "$_op" = 1 ] || return 0
-%[4]s    semodule -r %[1]s 2>/dev/null || :
+    semodule -r %[1]s 2>/dev/null || :
 }
 trap _rollback EXIT
 if ! semodule -i %%{_datadir}/selinux/packages/%[1]s.pp; then
@@ -156,5 +179,5 @@ fi
 %%files
 %%{_datadir}/selinux/packages/%[1]s.pp
 %%{_datadir}/selinux/hardener/%[1]s.fc
-`, app, relabel.String(), ports.String(), portsDel.String(), revision, restore.String())
+`, app, relabel.String(), ports.String(), portsDel.String(), revision, restore.String(), appPortType)
 }
