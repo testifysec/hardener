@@ -162,7 +162,15 @@ cat > %%{buildroot}%%{_datadir}/selinux/hardener/%[1]s.roots <<'HARDENER_ROOTS'
 # one left by a previously-failed upgrade.
 if [ "$1" -ge 2 ] && [ -f %%{_datadir}/selinux/hardener/%[1]s.roots ]; then
     rm -f %%{_datadir}/selinux/hardener/%[1]s.oldroots
-    cp %%{_datadir}/selinux/hardener/%[1]s.roots %%{_datadir}/selinux/hardener/%[1]s.oldroots 2>/dev/null || :
+    # Fail closed: if the roots inventory exists but cannot be stashed, %%post
+    # cannot reconcile removed roots, so an upgrade would silently retain stale
+    # labels. Refuse the upgrade rather than proceed without the inventory
+    # (review finding). (A pre-roots old version has no .roots file — the guard
+    # above skips this and there is nothing to reconcile.)
+    if ! cp %%{_datadir}/selinux/hardener/%[1]s.roots %%{_datadir}/selinux/hardener/%[1]s.oldroots; then
+        echo "ERROR: could not stash the current file-context roots for upgrade reconciliation; refusing a non-atomic upgrade" >&2
+        exit 1
+    fi
 fi
 
 %%post
@@ -204,6 +212,17 @@ _rollback() {
         # policy is fully back in place (review finding).
         ( cd "$_snap" && { semodule -i %[1]s.cil || semodule -i %[1]s.pp; } ) 2>/dev/null || :
 %[6]s
+        # Re-apply the PREVIOUS module's labels on ALL of its roots — including
+        # any removed root already reset to base before the failure — so the
+        # reinstated old module and the on-disk labels are consistent (review
+        # finding). Restoring only the new profile's roots (%[6]s above) would
+        # leave already-restored removed roots mislabeled under the old module.
+        if [ -f %%{_datadir}/selinux/hardener/%[1]s.oldroots ]; then
+            while IFS= read -r _oldroot; do
+                [ -n "$_oldroot" ] || continue
+                restorecon -RF -- "$_oldroot" 2>/dev/null || :
+            done < %%{_datadir}/selinux/hardener/%[1]s.oldroots
+        fi
         for _row in $_pruned; do _rp=${_row%%%%:*}; _rn=${_row##*:}; semanage port -a -t %[7]s -p "$_rp" "$_rn" 2>/dev/null || :; done
     fi
     # (On upgrade $_snap is always set — we abort above if the snapshot fails.)

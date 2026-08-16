@@ -12,8 +12,14 @@ import (
 // A pattern listed in failOn makes the matching script exit non-zero.
 type fakeRunner struct {
 	responses map[string]string
-	failOn    []string
-	calls     []string
+	// seq scripts a substring whose response CHANGES across calls: each match
+	// pops the next entry (the last entry sticks). Used to model a process whose
+	// identity differs between the pre- and post-exercise capture. Takes
+	// precedence over responses on a match.
+	seq    map[string][]string
+	seqPos map[string]int
+	failOn []string
+	calls  []string
 }
 
 func (f *fakeRunner) Run(script string) (string, error) {
@@ -22,6 +28,25 @@ func (f *fakeRunner) Run(script string) (string, error) {
 		if strings.Contains(script, pattern) {
 			return "", errors.New("exit status 1")
 		}
+	}
+	// Stateful sequence responses win over static ones, longest match first.
+	seqBest := ""
+	for pattern := range f.seq {
+		if strings.Contains(script, pattern) && len(pattern) > len(seqBest) {
+			seqBest = pattern
+		}
+	}
+	if seqBest != "" {
+		if f.seqPos == nil {
+			f.seqPos = map[string]int{}
+		}
+		q := f.seq[seqBest]
+		i := f.seqPos[seqBest]
+		if i >= len(q)-1 {
+			i = len(q) - 1
+		}
+		f.seqPos[seqBest]++
+		return q[i], nil
 	}
 	// Longest (most specific) matching key wins — deterministic, and lets a
 	// command that contains several keys (e.g. the MainPID capture also runs

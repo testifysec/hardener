@@ -25,6 +25,13 @@ type Lima struct {
 }
 
 func (l *Lima) Run(script string) (string, error) {
+	// An instance name beginning with '-' is parsed by `limactl shell` as a flag
+	// (e.g. "--help"), which can exit 0 WITHOUT running the script and make Run/
+	// WriteFile report false success (review finding). Reject empty or option-
+	// like instance names — a real Lima instance name never starts with '-'.
+	if l.Instance == "" || strings.HasPrefix(l.Instance, "-") {
+		return "", fmt.Errorf("invalid lima instance %q: must be an instance name, not an option", l.Instance)
+	}
 	timeout := l.Timeout
 	if timeout == 0 {
 		timeout = 10 * time.Minute

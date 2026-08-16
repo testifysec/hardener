@@ -43,3 +43,24 @@ func TestSSHTinyTimeoutNoPanic(t *testing.T) {
 		t.Error("a 1ns timeout (or missing ssh) must return an error, not succeed")
 	}
 }
+
+// Round 25/26: an option-like Target/Instance must be rejected before it can be
+// parsed by ssh/limactl as a flag (-oProxyCommand=… local exec, or --help that
+// exits 0 without running the script — a false success).
+func TestSSHRejectsOptionLikeTarget(t *testing.T) {
+	for _, tgt := range []string{"", "-oProxyCommand=touch /tmp/pwn", "--help"} {
+		s := &SSH{Target: tgt}
+		if _, err := s.Run("echo hi"); err == nil {
+			t.Errorf("option-like ssh target %q must be rejected", tgt)
+		}
+	}
+}
+
+func TestLimaRejectsOptionLikeInstance(t *testing.T) {
+	for _, inst := range []string{"", "--help", "-f"} {
+		l := &Lima{Instance: inst}
+		if _, err := l.Run("echo hi"); err == nil {
+			t.Errorf("option-like lima instance %q must be rejected", inst)
+		}
+	}
+}
