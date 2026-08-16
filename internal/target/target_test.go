@@ -390,3 +390,27 @@ baseline: baselines/widget.yaml
 		t.Error("baseline: without party: first must be rejected")
 	}
 }
+
+// Round 47: /var/run is a symlink to /run on RHEL, so a /var/run/systemd/system
+// claim must be rejected even with owned: true (it resolves to the shared unit
+// tree).
+func TestLoadRejectsVarRunSystemdTrees(t *testing.T) {
+	const m = `name: widget
+install: "true"
+unit: widget.service
+exercise: "true"
+executables:
+  - /opt/widget/bin/widgetd
+paths:
+  - { path: %q, kind: conf, owned: true }
+`
+	for _, p := range []string{
+		"/var/run/systemd/system(/.*)?",
+		"/var/run/systemd/user(/.*)?",
+		"/var/run/systemd/system/foo.service.d(/.*)?",
+	} {
+		if _, err := Load(write(t, fmt.Sprintf(m, p))); err == nil {
+			t.Errorf("%s must be rejected even with owned: true", p)
+		}
+	}
+}

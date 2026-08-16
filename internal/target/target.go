@@ -84,6 +84,10 @@ var sharedSystemdTrees = []string{
 	"/usr/lib/systemd/system", "/usr/lib/systemd/user",
 	"/lib/systemd/system", "/lib/systemd/user",
 	"/run/systemd/system", "/run/systemd/user",
+	// On RHEL /var/run is a symlink to /run, so a claim spelled with /var/run
+	// must be rejected too — a path string can't resolve the symlink (review
+	// finding).
+	"/var/run/systemd/system", "/var/run/systemd/user",
 }
 
 // isSharedSystemdTree reports whether root is, or is under, a shared systemd unit
