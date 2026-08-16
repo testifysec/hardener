@@ -73,6 +73,12 @@ var broadSystemRoots = map[string]bool{
 	"/usr/local/bin": true, "/usr/local/sbin": true, "/usr/local/lib": true,
 	"/var/lib": true, "/var/log": true, "/var/run": true, "/var/cache": true,
 	"/var/tmp": true, "/etc/systemd": true, "/usr/lib/systemd": true,
+	// Shared /var trees that hold OTHER services' data (mail/cron/at spools, web
+	// roots, add-on packages, lock files). Claiming one wholesale with owned:true
+	// would relabel unrelated data; an app owns a bounded subdir (/var/spool/myapp),
+	// never the parent (review finding).
+	"/var/spool": true, "/var/mail": true, "/var/www": true, "/var/opt": true,
+	"/var/lock": true, "/var/local": true,
 }
 
 // sharedSystemdTrees are the unit directories that hold EVERY service's unit

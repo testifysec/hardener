@@ -20,6 +20,7 @@ func passingRunner() *fakeRunner {
 		"uname -r":                  "5.14.0-427.el9.x86_64",
 		"rpm -q selinux-policy":     "selinux-policy-38.1.35-2.el9.noarch",
 		"systemctl show -p MainPID": "LABEL:system_u:system_r:widget_t:s0\nEXE:/opt/widget/bin/widgetd\nEXESHA:abababababababababababababababababababababababababababababababab",
+		"semodule -l":               "base\nselinux-policy\nunconfined\nsystemd\n", // base modules, no widget → no name conflict, non-empty baseline
 		"command -v sesearch":       "TOOLS_OK",
 		"sesearch -A -s init_t":     "allow init_t bin_t:file execute;",
 		"sha256sum":                 "abababababababababababababababababababababababababababababababab  /home/u/rpmbuild/RPMS/noarch/widget-selinux-1.0.0-1.el9.noarch.rpm",
