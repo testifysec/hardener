@@ -1,6 +1,7 @@
 package policy
 
 import (
+	"strings"
 	"testing"
 
 	"github.com/testifysec/hardener/internal/avc"
@@ -28,11 +29,11 @@ func TestUnknownForeignTypeFlagged(t *testing.T) {
 func TestSafeForeignTypeNotFlagged(t *testing.T) {
 	p := widgetProfile()
 	ds := []avc.Denial{{
-		SourceType: "widget_t", TargetType: "cert_t", Class: "file",
-		Perms: []string{"read", "open"}, Path: "/etc/pki/tls/cert.pem",
+		SourceType: "widget_t", TargetType: "net_conf_t", Class: "file",
+		Perms: []string{"read", "open"}, Path: "/etc/resolv.conf",
 	}}
 	if res := Refine(p, ds); len(res.Flags) != 0 {
-		t.Errorf("cert_t is safe and must not be flagged: %+v", res.Flags)
+		t.Errorf("net_conf_t is safe and must not be flagged: %+v", res.Flags)
 	}
 }
 
@@ -42,8 +43,8 @@ func TestSafeForeignTypeNotFlagged(t *testing.T) {
 func TestSafeForeignTypeExecuteFlagged(t *testing.T) {
 	p := widgetProfile()
 	ds := []avc.Denial{{
-		SourceType: "widget_t", TargetType: "cert_t", Class: "file",
-		Perms: []string{"execute"}, Path: "/etc/pki/tls/cert.pem",
+		SourceType: "widget_t", TargetType: "net_conf_t", Class: "file",
+		Perms: []string{"execute"}, Path: "/etc/resolv.conf",
 	}}
 	res := Refine(p, ds)
 	if len(res.Flags) != 1 {
@@ -165,5 +166,42 @@ func TestOwnPortTypeNotFlagged(t *testing.T) {
 	}}
 	if res := Refine(p, ds); len(res.Flags) != 0 {
 		t.Errorf("own port type must not be flagged: %+v", res.Flags)
+	}
+}
+
+// Round 39: cert_t labels TLS PRIVATE KEYS as well as public certs, so an
+// automatic read grant would let a confined daemon read other services' keys.
+// It must go to review.
+func TestCertTReadIsFlagged(t *testing.T) {
+	p := widgetProfile()
+	ds := []avc.Denial{{
+		SourceType: "widget_t", TargetType: "cert_t", Class: "file",
+		Perms: []string{"read", "open"}, Path: "/etc/pki/tls/private/key.pem",
+	}}
+	res := Refine(p, ds)
+	if len(res.Flags) != 1 {
+		t.Fatalf("cert_t read must be flagged for review, got %+v", res.Flags)
+	}
+}
+
+// Round 39: executing from a WRITABLE owned type (var_lib/log/runtime/tmp/cache)
+// is a W^X violation and must go to review, not auto-apply.
+func TestExecuteFromWritableOwnedTypeFlagged(t *testing.T) {
+	p := widgetProfile()
+	for _, wt := range []string{"widget_var_lib_t", "widget_log_t", "widget_tmp_t", "widget_cache_t", "widget_runtime_t"} {
+		ds := []avc.Denial{{
+			SourceType: "widget_t", TargetType: wt, Class: "file",
+			Perms: []string{"execute", "open", "read"},
+		}}
+		res := Refine(p, ds)
+		flagged := false
+		for _, f := range res.Flags {
+			if strings.Contains(f.Reason, "W^X") {
+				flagged = true
+			}
+		}
+		if !flagged {
+			t.Errorf("execute from writable %s must be flagged (W^X), got %+v", wt, res.Flags)
+		}
 	}
 }

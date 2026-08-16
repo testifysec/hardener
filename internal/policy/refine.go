@@ -61,12 +61,28 @@ type Refinement struct {
 	Entrypoints []EntrypointIssue
 }
 
+// writableOwnedSuffixes are the app's own WRITABLE data types. Executing from any
+// of them is a W^X violation worth review.
+var writableOwnedSuffixes = []string{"_var_lib_t", "_log_t", "_runtime_t", "_tmp_t", "_cache_t"}
+
+// isWritableOwnedType reports whether t is one of the app's writable data types.
+func isWritableOwnedType(t string) bool {
+	for _, s := range writableOwnedSuffixes {
+		if strings.HasSuffix(t, s) {
+			return true
+		}
+	}
+	return false
+}
+
 // safeForeignTypes is the curated allowlist of distro types a confined daemon
 // routinely reads with no meaningful risk. Everything else foreign goes to
 // review by default — the set of dangerous types is open-ended, so an
-// allowlist is the only fail-closed posture.
+// allowlist is the only fail-closed posture. cert_t is deliberately NOT here:
+// it labels TLS PRIVATE KEYS as well as public certs (/etc/pki/tls/private), so
+// auto-allowing reads would let a confined daemon read other services' keys —
+// it must go to review (review finding).
 var safeForeignTypes = map[string]bool{
-	"cert_t":            true, // TLS certs and keys under /etc/pki
 	"sysctl_net_t":      true, // /proc/sys/net tunables
 	"sysctl_kernel_t":   true, // read-only kernel tunables
 	"net_conf_t":        true, // /etc/resolv.conf, hosts
@@ -174,6 +190,16 @@ func Refine(p *profile.Profile, denials []avc.Denial) Refinement {
 			(strings.HasSuffix(d.TargetType, "_content_t") || strings.HasSuffix(d.TargetType, "_exec_t")) &&
 			!allReadOnly(perms) {
 			reason = "self-modification of read-only program files: " + d.TargetType
+		}
+		// Execution from a WRITABLE owned type (var_lib/log/runtime/tmp/cache) is a
+		// W^X violation — a domain that can both write and execute its data dir has
+		// a code-injection primitive. The self-modification check above covers the
+		// content/exec types; this covers the writable DATA types, which are neither
+		// foreign nor _content_t/_exec_t and would otherwise auto-apply (review
+		// finding).
+		if reason == "" && own[d.TargetType] && isWritableOwnedType(d.TargetType) &&
+			(hasPerm(perms, "execute") || hasPerm(perms, "execute_no_trans")) {
+			reason = "execution from a writable app type (W^X violation): " + d.TargetType
 		}
 		// Foreign-type access defaults to review. A type that is neither ours
 		// nor on the curated safe allowlist is an unknown grant — it must not

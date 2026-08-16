@@ -36,18 +36,18 @@ func TestRefineDetectsMislabel(t *testing.T) {
 func TestRefineEmitsAllowRule(t *testing.T) {
 	p := widgetProfile()
 	ds := []avc.Denial{{
-		SourceType: "widget_t", TargetType: "cert_t", Class: "file",
-		Perms: []string{"read", "open"}, Path: "/etc/pki/tls/cert.pem",
+		SourceType: "widget_t", TargetType: "net_conf_t", Class: "file",
+		Perms: []string{"read", "open"}, Path: "/etc/resolv.conf",
 	}}
 	res := Refine(p, ds)
 	if len(res.AllowRules) != 1 {
 		t.Fatalf("want 1 allow rule, got %+v", res)
 	}
 	r := res.AllowRules[0]
-	if r.Source != "widget_t" || r.Target != "cert_t" || r.Class != "file" {
+	if r.Source != "widget_t" || r.Target != "net_conf_t" || r.Class != "file" {
 		t.Errorf("rule: %+v", r)
 	}
-	if r.Render() != "allow widget_t cert_t:file { open read };" {
+	if r.Render() != "allow widget_t net_conf_t:file { open read };" {
 		t.Errorf("render: %q", r.Render())
 	}
 }
