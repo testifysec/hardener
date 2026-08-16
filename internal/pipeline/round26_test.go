@@ -36,6 +36,11 @@ func TestExerciseFailsOnMidRunIdentityChange(t *testing.T) {
 	if err == nil || !strings.Contains(err.Error(), "changed identity") {
 		t.Fatalf("mid-run identity change must fail closed, got err=%v", err)
 	}
+	// Round 36: the unit must be stopped before returning — a re-exec'd process
+	// must not be left running while cleanup removes its module.
+	if f.countCalls("systemctl stop widget.service") == 0 {
+		t.Error("identity-change failure must stop the unit before returning")
+	}
 }
 
 // A same-identity restart (new pid, same binary/label/digest) is benign and

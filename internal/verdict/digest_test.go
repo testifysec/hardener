@@ -217,3 +217,20 @@ func TestVerdictRejectsPartyMismatch(t *testing.T) {
 		t.Error("a party mismatch between res.Target.Party and res.Party must fail construction")
 	}
 }
+
+// Round 36: an unrelated caller-provided extra subject must NOT satisfy the
+// exercised-artifact requirement — only exercised entrypoint bytes or the built
+// RPM are authoritative. Otherwise any subject with a valid digest yields a pass.
+func TestVerdictRejectsUnrelatedExtraWithoutArtifact(t *testing.T) {
+	r := passingResult()
+	r.RPMPath = ""
+	r.EntrypointDigests = nil // no authoritative artifact
+	if _, err := BuildOrErr(r, Env{}, []Subject{{Name: "unrelated", SHA256: goodSHA}}); err == nil {
+		t.Error("an unrelated extra subject must not satisfy the artifact requirement")
+	}
+	// With entrypoint bytes present, the same build succeeds.
+	r.EntrypointDigests = map[string]string{"/opt/widget/bin/widgetd": goodSHA}
+	if _, err := BuildOrErr(r, Env{}, nil); err != nil {
+		t.Errorf("exercised entrypoint bytes must satisfy the artifact requirement: %v", err)
+	}
+}
