@@ -176,27 +176,27 @@ func Refine(p *profile.Profile, denials []avc.Denial) Refinement {
 				continue
 			}
 		}
+		// Classify mislabeled ENTRYPOINTS per-denial too, BEFORE merging: a launcher
+		// domain (init_t) denied execute on one of our non-exec owned types means we
+		// labeled an entrypoint as content instead of _exec_t. avc.Merge erases the
+		// path and collapses distinct entrypoints sharing source/target/class into
+		// one, so detection must happen here, like relabels (review finding).
+		if isLauncherDomain(d.SourceType) && own[d.TargetType] &&
+			!strings.HasSuffix(d.TargetType, "_exec_t") &&
+			isFileClass(d.Class) && hasPerm(d.Perms, "execute") {
+			res.Entrypoints = append(res.Entrypoints, EntrypointIssue{
+				Name: entrypointName(d), SourceType: d.SourceType, ObservedType: d.TargetType,
+			})
+			continue
+		}
 		remaining = append(remaining, d)
 	}
 	for _, d := range avc.Merge(remaining) {
 		if d.SourceType != dom {
-			// A foreign domain denied execute on one of our types means we
-			// labeled an entrypoint as content — fatal, and invisible if we
-			// only ever look at denials sourced from our own domain.
-			// A mislabeled entrypoint got a NON-exec owned type (e.g.
-			// content_t) instead of _exec_t, so the unit LAUNCHER (init_t) is
-			// denied execute on it. Scope tightly: only the launcher domain and
-			// only non-exec owned types — a correctly-labeled _exec_t, or an
-			// unrelated foreign domain like sshd_t, is expected noise, not a
-			// broken entrypoint (review finding).
-			if isLauncherDomain(d.SourceType) && own[d.TargetType] &&
-				!strings.HasSuffix(d.TargetType, "_exec_t") &&
-				isFileClass(d.Class) && hasPerm(d.Perms, "execute") {
-				res.Entrypoints = append(res.Entrypoints, EntrypointIssue{
-					Name: entrypointName(d), SourceType: d.SourceType, ObservedType: d.TargetType,
-				})
-			}
-			continue // other domains' business is not ours
+			// Entrypoint mislabels from a foreign launcher domain are now classified
+			// per-denial BEFORE the merge (above); any other foreign-source denial is
+			// another domain's business, not ours.
+			continue
 		}
 		perms := d.Perms
 		// Executing a helper requires the whole read+exec set; granting only
@@ -447,7 +447,15 @@ func FlagDeclaredCapabilities(app string, caps []string) []Flag {
 	dom := DomainType(app)
 	var flags []Flag
 	for _, c := range caps {
-		rule := AllowRule{Source: dom, Target: dom, Class: "capability", Perms: []string{c}}
+		// Emit each declared capability under its CORRECT class — bpf/perfmon/
+		// checkpoint_restore/... are capability2, so a hard-coded `capability`
+		// class produced an invalid review artifact that, if accepted, generated an
+		// uncompilable module (review finding — matches GenerateTE's partitioning).
+		class := "capability"
+		if capability2Perms[c] {
+			class = "capability2"
+		}
+		rule := AllowRule{Source: dom, Target: dom, Class: class, Perms: []string{c}}
 		if reason := dangerReason(rule); reason != "" {
 			flags = append(flags, Flag{Reason: reason + " (declared in manifest)", Rule: rule})
 		}

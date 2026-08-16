@@ -190,25 +190,29 @@ func Run(r vm.Runner, t *target.Target, opts Options) *Result {
 		!hasLine(out, "Enforcing") || !hasLine(out, "active") {
 		return fail("precheck", fmt.Errorf("verifier not observing (need Enforcing + auditd): %s %v", out, err))
 	}
-	// Record the baseline the verdict will be scoped to.
 	// Collect the verifier baseline that SCOPES the verdict, each value with its
 	// OWN command and validated non-empty. The prior single positional command
 	// was fail-open twice over: a failure left VerifierEnv empty (unscoped verdict
 	// still passed), and a missing line shifted every later value into the wrong
-	// field — e.g. the kernel recorded as the distro (review finding).
-	res.VerifierEnv = map[string]string{}
-	for _, fld := range []struct{ key, cmd string }{
-		{"distro", "cat /etc/redhat-release"},
-		{"kernel", "uname -r"},
-		{"selinuxMode", "getenforce"},
-		{"policyPackage", "rpm -q selinux-policy"},
-	} {
-		out, err := r.Run(fld.cmd)
-		v := strings.TrimSpace(out)
-		if err != nil || v == "" {
-			return fail("verifier-baseline", fmt.Errorf("could not collect verifier %s via %q (out=%q, err=%v) — refusing to sign an unscoped verdict", fld.key, fld.cmd, v, err))
+	// field — e.g. the kernel recorded as the distro (review finding). Collected
+	// AFTER install/setup (below), since those can legitimately update the
+	// selinux-policy package the verdict claims (review finding).
+	collectVerifierEnv := func() *Result {
+		res.VerifierEnv = map[string]string{}
+		for _, fld := range []struct{ key, cmd string }{
+			{"distro", "cat /etc/redhat-release"},
+			{"kernel", "uname -r"},
+			{"selinuxMode", "getenforce"},
+			{"policyPackage", "rpm -q selinux-policy"},
+		} {
+			out, err := r.Run(fld.cmd)
+			v := strings.TrimSpace(out)
+			if err != nil || v == "" {
+				return fail("verifier-baseline", fmt.Errorf("could not collect verifier %s via %q (out=%q, err=%v) — refusing to sign an unscoped verdict", fld.key, fld.cmd, v, err))
+			}
+			res.VerifierEnv[fld.key] = v
 		}
-		res.VerifierEnv[fld.key] = v
+		return nil
 	}
 
 	// Refuse to SHADOW an existing SELinux policy. If the domain type already
@@ -303,6 +307,12 @@ func Run(r vm.Runner, t *target.Target, opts Options) *Result {
 	}
 	if _, err := r.Run("sudo systemctl daemon-reload"); err != nil {
 		return fail("daemon-reload", err)
+	}
+	// Collect the verifier baseline NOW — after install/setup — so the attested
+	// package/kernel/mode reflect the state verification actually runs against, not
+	// a pre-install snapshot (review finding).
+	if r := collectVerifierEnv(); r != nil {
+		return r
 	}
 
 	// The unit's ExecStart is the binary systemd must be able to execute for
@@ -838,23 +848,6 @@ func isAppOwnedExecutable(p *profile.Profile, path string) bool {
 	return false
 }
 
-// underAnotherDeclaredRoot reports whether path falls under a DIFFERENT declared
-// path root than current — such a descendant legitimately carries that other
-// root's type (e.g. splunk's /opt/splunkforwarder/var under its content root),
-// so it must not be flagged as mislabeled.
-func underAnotherDeclaredRoot(path, current string, paths []profile.PathAccess) bool {
-	for _, pa := range paths {
-		other := fcRoot(pa.Path)
-		if other == "" || other == current {
-			continue
-		}
-		if path == other || strings.HasPrefix(path, strings.TrimRight(other, "/")+"/") {
-			return true
-		}
-	}
-	return false
-}
-
 // generatedTypes returns every SELinux type name this build may emit for the
 // app — the domain, the port type, and every kind's file type — so the conflict
 // check can refuse if a foreign module already owns ANY of them.
@@ -950,17 +943,26 @@ sudo semodule -i %s.pp
 		// Verify DESCENDANTS too, not only the root: a more-specific BASE-policy
 		// rule beneath a broad declared root can retain a different label while the
 		// root verifies (review finding — collision detection only compares exact
-		// patterns). List descendants NOT carrying our type; a legitimately-
-		// overlapping declared sub-path (splunk's var/etc under its content root) is
-		// excluded here.
-		desc, derr := r.Run(fmt.Sprintf("if [ -e %s ]; then find %s \\( -type f -o -type d \\) ! -context '*:%s:*' 2>/dev/null | head -50; fi", q, q, wantType))
-		if derr == nil {
-			for _, d := range strings.Split(strings.TrimSpace(desc), "\n") {
-				if d = strings.TrimSpace(d); d == "" || underAnotherDeclaredRoot(d, root, p.Paths) {
-					continue
-				}
-				return fmt.Errorf("descendant %s under declared root %s is not labeled %s — a more-specific file-context rule is overriding it; refusing to sign a mislabeled claim", d, root, wantType)
+		// patterns). PRIVILEGED find (root-only dirs would otherwise read empty),
+		// PRUNING any legitimately-overlapping declared sub-path (splunk's var/etc
+		// under its content root) IN the find, and stopping at the FIRST real
+		// mismatch (-quit) so no result cap can hide one. A find error fails closed.
+		prune := ""
+		for _, pa2 := range p.Paths {
+			other := fcRoot(pa2.Path)
+			if other == "" || other == root {
+				continue
 			}
+			if strings.HasPrefix(strings.TrimRight(other, "/")+"/", strings.TrimRight(root, "/")+"/") {
+				prune += fmt.Sprintf("-path %s -prune -o ", vm.ShellQuote(other))
+			}
+		}
+		desc, derr := r.Run(fmt.Sprintf("if [ -e %s ]; then sudo find %s %s\\( -type f -o -type d \\) ! -context '*:%s:*' -print -quit; fi", q, q, prune, wantType))
+		if derr != nil {
+			return fmt.Errorf("could not verify descendant labels under %s: %w", root, derr)
+		}
+		if d := strings.TrimSpace(desc); d != "" {
+			return fmt.Errorf("descendant %s under declared root %s is not labeled %s — a more-specific file-context rule is overriding it; refusing to sign a mislabeled claim", d, root, wantType)
 		}
 	}
 	// Verifying only the ROOT's label misses a more-specific file_contexts.local

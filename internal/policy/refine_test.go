@@ -154,3 +154,35 @@ func TestCanonicalExecUnionsObservedPerms(t *testing.T) {
 		t.Errorf("write must survive the canonical-exec expansion and be flagged: %+v", res.Flags)
 	}
 }
+
+// Round 46: FlagDeclaredCapabilities must emit each declared capability under its
+// correct class — bpf/perfmon are capability2 (a capability-class artifact would
+// be uncompilable if accepted).
+func TestFlagDeclaredCapabilitiesPartitionsByClass(t *testing.T) {
+	flags := FlagDeclaredCapabilities("widget", []string{"bpf", "perfmon", "sys_admin"})
+	byClass := map[string]string{}
+	for _, f := range flags {
+		byClass[f.Rule.Perms[0]] = f.Rule.Class
+	}
+	if byClass["bpf"] != "capability2" || byClass["perfmon"] != "capability2" {
+		t.Errorf("bpf/perfmon must be capability2, got %v", byClass)
+	}
+	if byClass["sys_admin"] != "capability" {
+		t.Errorf("sys_admin must be capability, got %q", byClass["sys_admin"])
+	}
+}
+
+// Round 46: two mislabeled entrypoints that would collapse under avc.Merge (same
+// source/target/class, empty path) must be classified per-denial before merging,
+// so BOTH surface.
+func TestEntrypointsClassifiedBeforeMerge(t *testing.T) {
+	p := widgetProfile()
+	ds := []avc.Denial{
+		{SourceType: "init_t", TargetType: "widget_content_t", Class: "file", Perms: []string{"execute"}, Name: "wd1"},
+		{SourceType: "init_t", TargetType: "widget_content_t", Class: "file", Perms: []string{"execute"}, Name: "wd2"},
+	}
+	res := Refine(p, ds)
+	if len(res.Entrypoints) != 2 {
+		t.Errorf("both mislabeled entrypoints must be detected before merge collapses them, got %d: %+v", len(res.Entrypoints), res.Entrypoints)
+	}
+}
