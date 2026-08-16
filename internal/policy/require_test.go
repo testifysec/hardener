@@ -3,6 +3,8 @@ package policy
 import (
 	"strings"
 	"testing"
+
+	"github.com/testifysec/hardener/internal/profile"
 )
 
 // Refined rules referencing types foreign to the module need a gen_require
@@ -31,5 +33,35 @@ func TestRenderRefinedSection(t *testing.T) {
 	}
 	if !strings.Contains(out, "allow widget_t widget_t:process setrlimit;") {
 		t.Errorf("self rule missing:\n%s", out)
+	}
+}
+
+// ownTypes must own EXACTLY what GenerateTE declares: dom + exec always, a kind
+// type only when a path of that kind exists, the port type only when ports are
+// declared. Over-marking let an externally defined same-name type (a foreign
+// widget_port_t when the profile has no ports) bypass foreign-type review while
+// its declaration was omitted from the module. (review finding — round 51)
+func TestOwnTypesMatchesGeneratedTypes(t *testing.T) {
+	// A minimal profile: one var_lib path, NO ports, NO conf/content/tmp/cache.
+	p := &profile.Profile{
+		Name:        "widget",
+		Executables: []string{"/opt/widget/bin/widgetd"},
+		Paths:       []profile.PathAccess{{Path: "/var/lib/widget(/.*)?", Kind: "var_lib"}},
+	}
+	own := ownTypes(p)
+	for _, want := range []string{"widget_t", "widget_exec_t", "widget_var_lib_t"} {
+		if !own[want] {
+			t.Errorf("%s must be owned", want)
+		}
+	}
+	// No ports declared → the port type is NOT ours; a foreign widget_port_t must
+	// reach foreign-type review, not be silently treated as owned.
+	if own[PortType(p.Name)] {
+		t.Errorf("%s must NOT be owned when the profile declares no ports", PortType(p.Name))
+	}
+	for _, notOwned := range []string{"widget_conf_t", "widget_content_t", "widget_tmp_t", "widget_cache_t", "widget_log_t"} {
+		if own[notOwned] {
+			t.Errorf("%s must NOT be owned — no matching path kind declared", notOwned)
+		}
 	}
 }

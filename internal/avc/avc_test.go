@@ -1,6 +1,7 @@
 package avc
 
 import (
+	"encoding/hex"
 	"reflect"
 	"testing"
 )
@@ -193,5 +194,52 @@ type=PATH msg=audit(1723640006.000:501): item=0 name="/etc/widget/widget.conf" i
 	}
 	if ds[0].Path != "/etc/widget/widget.conf" {
 		t.Errorf("absolute name must be preserved, got %q", ds[0].Path)
+	}
+}
+
+// The kernel HEX-encodes audit path fields that contain a space (or quote/
+// control char) as an unquoted all-hex run. The parser must decode it; taking
+// the hex literally leaves a bogus path that matches no file-context pattern,
+// so an owned mislabeled file is misread as a missing permission and
+// over-granted type-wide. (review finding — round 51)
+func TestParseLineDecodesHexEncodedPath(t *testing.T) {
+	p := "/etc/widget/my config.d/tls key.pem" // spaces → kernel hex-encodes
+	line := "type=AVC msg=audit(1723640010.000:700): avc:  denied  { read } for  pid=1 comm=\"widgetd\" name=" +
+		hex.EncodeToString([]byte(p)) +
+		" dev=\"vda2\" ino=5678 scontext=system_u:system_r:widget_t:s0 tcontext=system_u:object_r:etc_t:s0 tclass=file permissive=1"
+	d, err := ParseLine(line)
+	if err != nil {
+		t.Fatalf("ParseLine: %v", err)
+	}
+	if d.Name != p {
+		t.Errorf("hex-encoded name must decode to %q, got %q", p, d.Name)
+	}
+}
+
+// A hex-encoded relative name plus a hex-encoded CWD must decode AND resolve to
+// the absolute path.
+func TestParseLogDecodesHexPathAndCWD(t *testing.T) {
+	cwd := "/var/lib/widget/data dir" // space
+	rel := "sub dir/state.db"         // space
+	log := "type=AVC msg=audit(1723640011.000:701): avc:  denied  { write } for  pid=1 comm=\"widgetd\" ino=42 scontext=system_u:system_r:widget_t:s0 tcontext=system_u:object_r:var_lib_t:s0 tclass=file permissive=1\n" +
+		"type=CWD msg=audit(1723640011.000:701): cwd=" + hex.EncodeToString([]byte(cwd)) + "\n" +
+		"type=PATH msg=audit(1723640011.000:701): item=0 name=" + hex.EncodeToString([]byte(rel)) + " inode=42 dev=\"vda2\""
+	ds := ParseLogWithPaths(log + "\n")
+	want := "/var/lib/widget/data dir/sub dir/state.db"
+	if len(ds) != 1 || ds[0].Path != want {
+		t.Errorf("hex CWD+name must decode and resolve to %q, got %+v", want, ds)
+	}
+}
+
+// A quoted value that happens to be all-hex (e.g. a real file literally named
+// "deadbeef") must NOT be decoded — hex encoding is only ever unquoted.
+func TestParseLineDoesNotDecodeQuotedHexLookalike(t *testing.T) {
+	line := `type=AVC msg=audit(1723640012.000:702): avc:  denied  { read } for  pid=1 comm="widgetd" name="deadbeef" dev="vda2" ino=5 scontext=system_u:system_r:widget_t:s0 tcontext=system_u:object_r:etc_t:s0 tclass=file permissive=1`
+	d, err := ParseLine(line)
+	if err != nil {
+		t.Fatalf("ParseLine: %v", err)
+	}
+	if d.Name != "deadbeef" {
+		t.Errorf("a quoted hex-lookalike name must stay literal, got %q", d.Name)
 	}
 }
