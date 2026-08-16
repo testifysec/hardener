@@ -26,7 +26,11 @@ func passingResult() *pipeline.Result {
 		EnforceOK: true, DomainOK: true, ExerciseOK: true, FlagsAccepted: true,
 		EntrypointDigests: map[string]string{"/usr/sbin/widgetd": "abababababababababababababababababababababababababababababababab"},
 		EntrypointPaths:   []string{"/usr/sbin/widgetd"},
-		StaticChecks:      []pipeline.StaticCheck{{Name: "no shadow_t read/write", Passed: true}},
+		// A passing verdict must have observed at least one entrypoint executing in
+		// the app domain under enforcement (round 76) — a pass with an empty observed
+		// set would certify bytes that were never exercised.
+		ObservedEntrypoints: []string{"/usr/sbin/widgetd"},
+		StaticChecks:        []pipeline.StaticCheck{{Name: "no shadow_t read/write", Passed: true}},
 		// RPMPath is deliberately empty here: RPM-subject binding is exercised
 		// where it matters (TestBuildStatementShape passes the RPM via extra,
 		// TestPassingVerdictRequiresRPMSubjectWhenRPMProduced sets RPMPath). The
@@ -202,5 +206,46 @@ func TestCoverageDisclosesObservedVsDeclaredEntrypoints(t *testing.T) {
 		if o == "/usr/libexec/widget-helper" {
 			t.Error("a helper that never ran as MainPID must not be reported as observed")
 		}
+	}
+}
+
+// Round 76: ObservedEntrypoints (added round 72) was REPORTED but never validated.
+// A pass could therefore carry an empty observed set — certifying bytes that were
+// never seen executing under enforcement — or an observed path outside the bound
+// digest set, i.e. evidence about something the statement does not bind.
+func TestPassingVerdictValidatesObservedEntrypoints(t *testing.T) {
+	// Empty observed set on a pass must be refused.
+	r := passingResult()
+	r.ObservedEntrypoints = nil
+	if _, err := BuildOrErr(r, Env{}, nil); err == nil {
+		t.Error("a passing verdict with no observed entrypoint must be refused")
+	} else if !strings.Contains(err.Error(), "observed no entrypoint") {
+		t.Errorf("unexpected error: %v", err)
+	}
+	// An observed path outside the resolved/bound set must be refused.
+	r2 := passingResult()
+	r2.ObservedEntrypoints = []string{"/usr/bin/somethingelse"}
+	if _, err := BuildOrErr(r2, Env{}, nil); err == nil {
+		t.Error("an observed entrypoint outside the bound set must be refused")
+	} else if !strings.Contains(err.Error(), "not in the resolved entrypoint set") {
+		t.Errorf("unexpected error: %v", err)
+	}
+	// An observed path that is resolved but has no bound digest must be refused.
+	r3 := passingResult()
+	r3.EntrypointPaths = append(r3.EntrypointPaths, "/usr/sbin/helper")
+	r3.ObservedEntrypoints = []string{"/usr/sbin/helper"}
+	if _, err := BuildOrErr(r3, Env{}, nil); err == nil {
+		t.Error("an observed entrypoint without a bound digest must be refused")
+	}
+	// The happy path still builds.
+	if _, err := BuildOrErr(passingResult(), Env{}, nil); err != nil {
+		t.Errorf("a well-formed passing result must still build: %v", err)
+	}
+	// A FAILING verdict is not subject to these checks (nothing is being certified).
+	rf := passingResult()
+	rf.ObservedEntrypoints = nil
+	rf.EnforceOK = false
+	if _, err := BuildOrErr(rf, Env{}, nil); err != nil {
+		t.Errorf("a failing verdict must still serialize: %v", err)
 	}
 }

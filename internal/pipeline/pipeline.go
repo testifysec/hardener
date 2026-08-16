@@ -324,7 +324,18 @@ func Run(r vm.Runner, t *target.Target, opts Options) *Result {
 		// unrelated policy (review finding). Any pre-existing generated type is a
 		// conflict.
 		for _, gt := range generatedTypes(p) {
-			if out, err := r.Run(fmt.Sprintf("seinfo -t %s 2>/dev/null", gt)); err == nil && strings.Contains(out, gt) {
+			out, err := r.Run(fmt.Sprintf("seinfo -t %s 2>/dev/null", gt))
+			if err != nil {
+				// FAIL CLOSED. `err == nil &&` silently reduced a query FAILURE to
+				// "type absent", and for <app>_port_t that is destructive: install
+				// proceeds, reconcileStalePorts then deletes mappings belonging to the
+				// foreign module that actually owns the type, and only afterwards does
+				// semodule -i fail on the duplicate (review finding — round 76).
+				// A genuinely absent type is NOT an error — seinfo exits 0 and prints
+				// "Types: 0" — so a nonzero exit really does mean the query broke.
+				return false, fmt.Errorf("cannot query SELinux type %s (seinfo failed: %w) — refusing to treat an unverifiable type as absent", gt, err)
+			}
+			if strings.Contains(out, gt) {
 				return true, nil // one of our generated types is already defined → conflict
 			}
 		}
