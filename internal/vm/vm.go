@@ -59,7 +59,15 @@ func (w *cappedWriter) Write(p []byte) (int, error) {
 // killing the child as soon as the limit is exceeded. Returns the captured
 // output, whether the limit was hit, and the run error.
 func runCapped(cmd *exec.Cmd) (string, bool, error) {
-	w := &cappedWriter{limit: MaxOutputBytes}
+	return runCappedLimit(cmd, MaxOutputBytes)
+}
+
+// runCappedLimit is runCapped with an explicit limit so tests can exercise the
+// overflow path — including the kill wiring — through the SAME code the
+// production path uses. A test that rebuilt the callback itself would stay green
+// if that wiring were removed here (review finding — round 77).
+func runCappedLimit(cmd *exec.Cmd, limit int) (string, bool, error) {
+	w := &cappedWriter{limit: limit}
 	w.onOver = func() {
 		if cmd.Process != nil {
 			_ = cmd.Process.Kill()

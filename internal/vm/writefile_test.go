@@ -110,31 +110,37 @@ func TestCappedWriterBoundsOutputAndFailsClosed(t *testing.T) {
 // full pipe until the 10-minute timeout. The writer must kill the command as soon
 // as the cap is exceeded.
 func TestRunCappedKillsChildOnOverflow(t *testing.T) {
-	// yes(1) emits unbounded output; with a tiny cap this must return promptly
-	// rather than hang until a timeout.
-	cmd := exec.Command("sh", "-c", "yes hello")
-	w := &cappedWriter{limit: 4096}
-	w.onOver = func() {
-		if cmd.Process != nil {
-			_ = cmd.Process.Kill()
-		}
-	}
-	cmd.Stdout = w
-	cmd.Stderr = w
-	done := make(chan error, 1)
+	// Exercise runCappedLimit — the SAME function the production path uses — so
+	// removing the overflow-kill wiring there fails this test. Rebuilding the
+	// callback inside the test would have left it green (review finding — round 77).
+	// The child emits unbounded output; with a tiny cap this must return promptly
+	// rather than block on a full pipe until the timeout.
+	// The producer must IGNORE SIGPIPE. Without that, os/exec closes the pipe when
+	// the writer errors and the child dies of SIGPIPE on its own — so the test would
+	// pass even with the kill wiring removed (verified by mutation). Trapping PIPE
+	// makes the explicit kill the ONLY thing that can stop it.
+	cmd := exec.Command("sh", "-c", "trap '' PIPE; while :; do echo hello; done")
+	done := make(chan struct{})
+	var out string
+	var over bool
 	start := time.Now()
-	go func() { done <- cmd.Run() }()
+	go func() {
+		out, over, _ = runCappedLimit(cmd, 4096)
+		close(done)
+	}()
 	select {
 	case <-done:
 	case <-time.After(20 * time.Second):
-		_ = cmd.Process.Kill()
+		if cmd.Process != nil {
+			_ = cmd.Process.Kill()
+		}
 		t.Fatal("runCapped must kill the child on overflow, not block until the timeout")
 	}
-	if !w.over {
-		t.Error("the writer must have latched over=true")
+	if !over {
+		t.Error("the overflow flag must be set")
 	}
-	if w.buf.Len() > w.limit {
-		t.Errorf("buffered %d bytes, must not exceed the cap %d", w.buf.Len(), w.limit)
+	if len(out) > 4096 {
+		t.Errorf("captured %d bytes, must not exceed the cap 4096", len(out))
 	}
 	if elapsed := time.Since(start); elapsed > 20*time.Second {
 		t.Errorf("took %s — the child was not killed promptly", elapsed)
