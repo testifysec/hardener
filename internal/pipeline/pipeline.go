@@ -371,6 +371,18 @@ func Run(r vm.Runner, t *target.Target, opts Options) *Result {
 			"SELinux type %s already exists on the verifier — %s is already confined by an existing policy (or its name collides with distro policy); hardener will not shadow it. Use a distinct name or a clean verifier", dom, t.Name))
 	}
 
+	// Reject a declared root that touches a REAL home directory. target.Load
+	// already refuses the standard bases (/home, /root, /var/home) and the per-user
+	// systemd suffixes, but it cannot know that an admin put homes somewhere else:
+	// a claim on /srv/people/bob is neither under a known base nor does it END in a
+	// systemd suffix, yet `restorecon -RF` on it would walk straight through
+	// /srv/people/bob/.config/systemd/user (review finding — round 81; the round-80
+	// suffix rule caught the exact systemd path but not its ancestor). The verifier
+	// knows the real answer, so ask it: /etc/passwd lists the actual home roots.
+	if err := checkDeclaredRootsAgainstHomes(r, p); err != nil {
+		return fail("home-path-claim", err)
+	}
+
 	// 1. Install the application. From here on hardener is responsible for the
 	// unit's state, so cleanup may stop it; before this point a failure must leave
 	// any same-named running service alone (review finding — round 75).
@@ -1893,6 +1905,61 @@ func fcRoot(pattern string) string {
 		pattern = strings.TrimSuffix(pattern, suffix)
 	}
 	return pattern
+}
+
+// checkDeclaredRootsAgainstHomes rejects any declared root that IS, CONTAINS, or
+// lies UNDER a real user home directory as listed in /etc/passwd. Manifest-time
+// validation can only guard the conventional bases; this catches an admin-chosen
+// home root (/srv/people/bob, /export/home/bob) whose ANCESTOR a manifest could
+// otherwise claim and then recursively relabel — including that user's
+// ~/.config/systemd/user units (review finding — round 81).
+//
+// Pseudo-users whose "home" is a system directory (/, /sbin, /var/empty, /dev/null,
+// /nonexistent) are skipped: those are placeholders, not real homes, and treating
+// / as a home would reject every profile.
+func checkDeclaredRootsAgainstHomes(r vm.Runner, p *profile.Profile) error {
+	roots := map[string]bool{}
+	for _, pa := range p.Paths {
+		if root := fcRoot(pa.Path); root != "" {
+			roots[strings.TrimRight(root, "/")] = true
+		}
+	}
+	for _, exe := range p.Executables {
+		roots[strings.TrimRight(exe, "/")] = true
+	}
+	if len(roots) == 0 {
+		return nil
+	}
+	out, err := r.Run("getent passwd 2>/dev/null || cat /etc/passwd")
+	if err != nil {
+		return fmt.Errorf("could not enumerate user home directories to check the declared paths: %w", err)
+	}
+	skip := map[string]bool{
+		"": true, "/": true, "/sbin": true, "/bin": true, "/dev/null": true,
+		"/var/empty": true, "/nonexistent": true, "/proc": true, "/usr/sbin": true,
+	}
+	for _, line := range strings.Split(out, "\n") {
+		f := strings.Split(line, ":")
+		if len(f) < 6 {
+			continue
+		}
+		home := strings.TrimRight(strings.TrimSpace(f[5]), "/")
+		if home == "" {
+			home = "/"
+		}
+		if skip[home] || !strings.HasPrefix(home, "/") {
+			continue
+		}
+		for root := range roots {
+			// root == home, root under home, or root an ANCESTOR of home.
+			if root == home || strings.HasPrefix(root, home+"/") || strings.HasPrefix(home+"/", root+"/") {
+				return fmt.Errorf(
+					"declared path %s is, contains, or lies under the home directory of user %q (%s) — relabeling it would rewrite that user's files, including ~/.config/systemd/user units; a system service must not claim paths inside a home",
+					root, f[0], home)
+			}
+		}
+	}
+	return nil
 }
 
 // checkBaseRulesUnderRoots rejects a base-policy file-context rule that would

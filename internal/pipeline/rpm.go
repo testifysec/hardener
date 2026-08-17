@@ -406,6 +406,14 @@ BuildArch:      noarch
 Source0:        %[1]s.pp
 Source1:        %[1]s.fc
 Requires:       policycoreutils
+# %%pre runs semodule AND semanage (the fresh-install port-ownership guard and the
+# local file-context overlap check), so both packages must be present BEFORE it
+# executes. A plain Requires: only orders the package's runtime dependency, not
+# this package's own scriptlets — RPM needs Requires(pre) for that. Without it a
+# minimal host could run %%pre before policycoreutils-python-utils was installed,
+# and because the preflight fails CLOSED on an unusable semanage, the install would
+# be refused outright rather than degrade (review finding — round 81).
+Requires(pre):  policycoreutils policycoreutils-python-utils
 Requires(post): policycoreutils policycoreutils-python-utils
 Requires(postun): policycoreutils policycoreutils-python-utils
 
