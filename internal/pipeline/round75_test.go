@@ -58,14 +58,26 @@ func TestPostunLabelRestoreFailsClosed(t *testing.T) {
 	}
 	spec := GenerateSpec(p, "20260101000000")
 	postun := spec[strings.Index(spec, "\n%postun\n"):]
+	// Round 79 refined this: still fail closed, but attempt EVERY path first and
+	// report at the end. Aborting on the first failure could not roll back the
+	// erase and abandoned the remaining paths, leaving MORE files undefined.
 	for _, want := range []string{
-		"if [ -e '/var/lib/widget' ]; then restorecon -RF -- '/var/lib/widget' ||",
-		"those files keep an undefined SELinux type",
-		"it keeps an undefined SELinux type",
+		"if [ -e '/var/lib/widget' ]; then restorecon -RF -- '/var/lib/widget' || _rsfail=",
+		"those files keep an undefined type and may be inaccessible",
+		`if [ -n "$_rsfail" ]; then`,
 	} {
 		if !strings.Contains(postun, want) {
-			t.Errorf("postun label restore must fail closed; missing %q", want)
+			t.Errorf("postun label restore must collect failures then fail closed; missing %q", want)
 		}
+	}
+	// No early exit between the per-path restores.
+	firstRestore := strings.Index(postun, "restorecon -RF -- '/var/lib/widget'")
+	report := strings.Index(postun, `if [ -n "$_rsfail" ]`)
+	if firstRestore < 0 || report < 0 || firstRestore > report {
+		t.Error("the failure report must come after all per-path restores")
+	}
+	if strings.Contains(postun, "restorecon -RF -- '/var/lib/widget' || { echo") {
+		t.Error("postun must no longer abort on the first restore failure")
 	}
 	if strings.Contains(postun, "warning: could not restore some widget file labels") {
 		t.Error("postun must no longer downgrade a label-restore failure to a warning")

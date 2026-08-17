@@ -355,17 +355,29 @@ func GenerateSpec(p *profile.Profile, revision string) string {
 	// and cannot be relabeled fails the uninstall loudly. Best-effort remains
 	// correct in the %post ROLLBACK paths above, which are already handling a
 	// failure and must finish their remaining steps.
+	// IMPORTANT: attempt EVERY path, then report. Exiting on the first failure (the
+	// round-75 form) could not roll back the erase — the payload and module are
+	// already gone by %%postun — and it ABANDONED the remaining paths, so one
+	// unrelabelable file left every later path with an undefined type too. That
+	// made a bad situation strictly worse (review finding — round 79). Restore as
+	// much as possible, collect what failed, and exit non-zero at the END so rpm
+	// still reports the failure and the operator sees exactly which paths need
+	// manual attention.
 	var restoreStrict strings.Builder
+	restoreStrict.WriteString("_rsfail=\"\"\n")
 	for _, root := range RelabelRoots(p) {
 		fmt.Fprintf(&restoreStrict,
-			"if [ -e %[1]s ]; then restorecon -RF -- %[1]s || { echo \"ERROR: could not restore base file labels under a %[2]s path after module removal; those files keep an undefined SELinux type and may be inaccessible — run: sudo restorecon -RF <path>\" >&2; exit 1; }; fi\n",
-			vm.ShellQuote(root), app)
+			"if [ -e %[1]s ]; then restorecon -RF -- %[1]s || _rsfail=\"$_rsfail %[1]s\"; fi\n",
+			vm.ShellQuote(root))
 	}
 	for _, exe := range p.Executables {
 		fmt.Fprintf(&restoreStrict,
-			"if [ -e %[1]s ]; then restorecon -F -- %[1]s || { echo \"ERROR: could not restore the base label on a %[2]s entrypoint after module removal; it keeps an undefined SELinux type and may be unexecutable — run: sudo restorecon -F <path>\" >&2; exit 1; }; fi\n",
-			vm.ShellQuote(exe), app)
+			"if [ -e %[1]s ]; then restorecon -F -- %[1]s || _rsfail=\"$_rsfail %[1]s\"; fi\n",
+			vm.ShellQuote(exe))
 	}
+	fmt.Fprintf(&restoreStrict,
+		"if [ -n \"$_rsfail\" ]; then echo \"ERROR: could not restore base SELinux labels for %[1]s on:$_rsfail — those files keep an undefined type and may be inaccessible. Restore them manually: sudo restorecon -RF <path>\" >&2; exit 1; fi\n",
+		app)
 	// rootsContent is the list of file-context roots this build labels, shipped
 	// as <app>.roots so an upgrade can detect roots REMOVED from the profile and
 	// restore their base labels (review finding).
@@ -543,13 +555,25 @@ _rollback() {
         # 74). Capture the EXIT STATUS as well and treat any nonzero as unverifiable.
         semodule -r %[1]s 2>/dev/null || :
         _mlrc=0
+        _removed=0
         _ml="$(semodule -l 2>/dev/null)" || _mlrc=$?
         if [ "$_mlrc" != 0 ] || [ -z "$_ml" ]; then
             echo "CRITICAL: cannot verify removal of the rejected %[1]s policy module (semodule -l failed); it may still be loaded and confining the app under UNVERIFIED policy. Remove it manually: sudo semodule -r %[1]s" >&2
         elif printf '%%s\n' "$_ml" | grep -qE "^%[1]s([[:space:]]|$)"; then
             echo "CRITICAL: the rejected %[1]s policy module is still loaded after rollback; the application may be confined by UNVERIFIED policy. Remove it manually: sudo semodule -r %[1]s" >&2
+        else
+            _removed=1
         fi
+        # Restore base labels ONLY once removal is CONFIRMED. The rejected module's
+        # file-contexts are still active while it is loaded, so restorecon would
+        # reapply ITS OWN unverified types instead of the base ones — the same
+        # mistake the verifier-side cleanup made (review finding — round 79, the
+        # %%post twin of the round-78 fix).
+        if [ "$_removed" = 1 ]; then
 %[6]s
+        else
+            echo "CRITICAL: skipping label restoration for %[1]s because the rejected module is still loaded — relabeling now would reapply its unverified types. Remove the module manually, then run: sudo restorecon -RF <declared paths>" >&2
+        fi
     elif [ -n "$_snap" ]; then
         # Upgrade failure: reinstall the PREVIOUS module and re-apply its labels so
         # the prior working policy is back in place (review finding). VERIFY it
@@ -569,21 +593,28 @@ _rollback() {
             fi
             [ -n "$_vfy" ] && rm -rf "$_vfy" 2>/dev/null || :
         fi
-        if [ "$_restored" != 1 ]; then
-            echo "CRITICAL: restoration of the previous %[1]s policy module failed or its content did not match the pre-upgrade snapshot; the application has NO verified policy active. Restore it from the prior package immediately." >&2
-        fi
+        # Relabel ONLY after the previous module is confirmed back. restorecon
+        # applies whatever file-contexts are ACTIVE: with the old module restored
+        # that is the old (verified) policy, which is what we want — but if
+        # restoration failed we cannot know whether the REJECTED module is still
+        # loaded, and relabeling would then stamp its unverified types across the
+        # app's trees (review finding — round 79).
+        if [ "$_restored" = 1 ]; then
 %[6]s
-        # Re-apply the PREVIOUS module's labels on ALL of its roots — including
-        # any removed root already reset to base before the failure — so the
-        # reinstated old module and the on-disk labels are consistent (review
-        # finding). Restoring only the new profile's roots (the base-label restore
-        # above) would leave already-restored removed roots mislabeled under the
-        # old module.
-        if [ -f %%{_datadir}/selinux/hardener/%[1]s.oldroots ]; then
-            while IFS= read -r _oldroot; do
-                [ -n "$_oldroot" ] || continue
-                restorecon -RF -- "$_oldroot" 2>/dev/null || :
-            done < %%{_datadir}/selinux/hardener/%[1]s.oldroots
+            # Re-apply the PREVIOUS module's labels on ALL of its roots — including
+            # any removed root already reset to base before the failure — so the
+            # reinstated old module and the on-disk labels are consistent (review
+            # finding). Restoring only the new profile's roots (the base-label
+            # restore above) would leave already-restored removed roots mislabeled
+            # under the old module.
+            if [ -f %%{_datadir}/selinux/hardener/%[1]s.oldroots ]; then
+                while IFS= read -r _oldroot; do
+                    [ -n "$_oldroot" ] || continue
+                    restorecon -RF -- "$_oldroot" 2>/dev/null || :
+                done < %%{_datadir}/selinux/hardener/%[1]s.oldroots
+            fi
+        else
+            echo "CRITICAL: restoration of the previous %[1]s policy module failed or its content did not match the pre-upgrade snapshot; the application has NO verified policy active. Labels were left untouched — relabeling now could stamp the rejected module's types. Restore the prior package, then run: sudo restorecon -RF <declared paths>" >&2
         fi
     fi
     # RESTORE the port mappings THIS transaction pruned — in EVERY rollback path.
