@@ -258,19 +258,30 @@ func GenerateSpec(p *profile.Profile, revision string) string {
 	// a successful upgrade sets _ok=1 so rollback never restored them (review
 	// finding — round 76). Each build therefore ships its declared proto:port set as
 	// <app>.ports; %pre stashes it to .oldports on upgrade (same mechanism as
-	// .roots), and a row is pruned only when it appears there. A row we cannot prove
-	// was ours is LEFT ALONE with a warning — never deleted. (If it genuinely
-	// conflicts, semodule -i fails loudly, which is far better than destroying
-	// unrelated policy.)
+	// .roots), and a row is pruned only when it appears there.
+	//
+	// A row we cannot prove was ours is never DELETED — but it cannot be tolerated
+	// either. GenerateTE grants name_bind on the whole <app>_port_t, so leaving an
+	// undeclared mapping active (tcp 9999 alongside a declared tcp 8443) hands the
+	// domain a bind privilege that was never verified, while the install reports
+	// success. Warning and continuing was therefore wrong (review finding — round
+	// 80, correcting the round-76 change). ABORT instead: refuse the install without
+	// touching a mapping that may belong to another module, and tell the operator.
+	//
+	// .oldports is consumed ONLY on upgrade. A stale inventory left behind by a
+	// failed upgrade would otherwise let a later FRESH install delete mappings that
+	// now belong to someone else (review finding — round 80); on a fresh install we
+	// have never owned this port type, so the inventory is meaningless and removed.
 	reconcile := fmt.Sprintf(
 		"_portlist=\"$(semanage port -l 2>/dev/null)\" || { echo \"ERROR: 'semanage port -l' failed during %[1]s port reconciliation; refusing to risk leaving an undeclared bind privilege\" >&2; exit 1; }\n"+
 			"if [ -z \"$_portlist\" ]; then echo \"ERROR: 'semanage port -l' returned no output during %[1]s reconciliation; refusing to proceed\" >&2; exit 1; fi\n"+
 			"_oldports=\" \"\n"+
-			"if [ -f %%{_datadir}/selinux/hardener/%[3]s.oldports ]; then _oldports=\" $(tr '\\n' ' ' < %%{_datadir}/selinux/hardener/%[3]s.oldports) \"; fi\n"+
+			"if [ \"$_op\" = 1 ]; then rm -f %%{_datadir}/selinux/hardener/%[3]s.oldports; "+
+			"elif [ -f %%{_datadir}/selinux/hardener/%[3]s.oldports ]; then _oldports=\" $(tr '\\n' ' ' < %%{_datadir}/selinux/hardener/%[3]s.oldports) \"; fi\n"+
 			"for _row in $(printf '%%s\\n' \"$_portlist\" | awk '$1==\"%[1]s\"{for(i=3;i<=NF;i++){gsub(\",\",\"\",$i); print $2\":\"$i}}'); do "+
 			"case \"%[2]s\" in *\" $_row \"*) continue ;; esac; "+
 			"case \"$_oldports\" in *\" $_row \"*) : ;; "+
-			"*) echo \"warning: port mapping $_row under %[1]s was not declared by the previous %[3]s package; leaving it alone rather than deleting a mapping that may belong to another module\" >&2; continue ;; esac; "+
+			"*) echo \"ERROR: port mapping $_row is bound to %[1]s but was not declared by this %[3]s package or the previous one. Removing it could destroy another module's mapping, and leaving it would grant %[3]s an unverified name_bind on that port — refusing to install. Resolve the mapping manually, then retry.\" >&2; exit 1 ;; esac; "+
 			"_pp=${_row%%%%:*}; _pn=${_row##*:}; "+
 			"if semanage port -d -p \"$_pp\" \"$_pn\" 2>/dev/null; then _pruned=\"$_pruned $_row\"; "+
 			"else echo \"ERROR: could not prune stale port $_row from %[1]s — refusing to leave an undeclared bind privilege\" >&2; exit 1; fi; done\n",

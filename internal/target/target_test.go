@@ -659,3 +659,42 @@ paths:
 		t.Errorf("a bounded app runtime dir must still load: %v", err)
 	}
 }
+
+// Round 80: sharedSystemdTrees lists ABSOLUTE paths, so it could never cover the
+// PER-USER unit directories — the username sits in the middle
+// (/home/<user>/.config/systemd/user). A manifest NAMED after the user satisfied
+// the ownership heuristic, so it could claim those paths without owned:true and
+// recursively relabel every one of that user's units. (review finding)
+func TestLoadRejectsPerUserSystemdTrees(t *testing.T) {
+	tmpl := `name: %s
+install: "true"
+unit: %s.service
+exercise: "true"
+executables:
+  - /opt/%s/bin/%sd
+paths:
+  - { path: "%s(/.*)?", kind: conf, owned: true }
+`
+	for _, dir := range []string{
+		"/home/bob/.config/systemd/user",
+		"/home/bob/.local/share/systemd/user",
+		"/home/bob/.config/systemd",
+		"/home/bob",
+		"/home",
+		"/root/.config/systemd/user",
+		"/root",
+		"/var/home/bob/.config/systemd/user",
+		// An unusual home location must still be caught by the suffix rule.
+		"/srv/people/bob/.config/systemd/user",
+	} {
+		m := fmt.Sprintf(tmpl, "bob", "bob", "bob", "bob", dir)
+		if _, err := Load(write(t, m)); err == nil {
+			t.Errorf("claiming per-user systemd path %q must be rejected even with owned: true", dir)
+		}
+	}
+	// A normal system path is unaffected.
+	ok := fmt.Sprintf(tmpl, "widget", "widget", "widget", "widget", "/var/lib/widget")
+	if _, err := Load(write(t, ok)); err != nil {
+		t.Errorf("an ordinary system path must still load: %v", err)
+	}
+}
