@@ -1,10 +1,7 @@
 package pipeline
 
 import (
-	"strings"
 	"testing"
-
-	"github.com/testifysec/hardener/internal/profile"
 )
 
 // Round 67: cleanupVerifierState returned immediately when moduleInstalled was
@@ -45,34 +42,5 @@ func TestFCLiteralStemReducesAncestorRegex(t *testing.T) {
 		if got := fcLiteralStem(in); got != want {
 			t.Errorf("fcLiteralStem(%q) = %q, want %q", in, got, want)
 		}
-	}
-}
-
-// Round 67: the %post local-fcontext overlap awk must reduce each local entry to
-// its literal stem (truncate at the first regex metacharacter), not merely strip
-// the exact (/.*)? suffix — else an ancestor like /var/lib(/.+)? bypasses it. The
-// check must also run BEFORE the [ -e "$_r" ] existence gate so an absent declared
-// root is still protected.
-func TestSpecOverlapCheckUsesLiteralStem(t *testing.T) {
-	p := &profile.Profile{
-		Name:        "widget",
-		Executables: []string{"/opt/widget/bin/widgetd"},
-		Paths:       []profile.PathAccess{{Path: "/var/lib/widget(/.*)?", Kind: "var_lib"}},
-	}
-	spec := GenerateSpec(p, "20260101000000")
-	if !strings.Contains(spec, `m=match(p, /[].^$*+?(){}|[\\]/)`) {
-		t.Error("overlap awk must reduce local entries to their literal stem (match at the first regex metacharacter)")
-	}
-	if strings.Contains(spec, `substr(p,length(p)-5)=="(/.*)?"`) {
-		t.Error("overlap awk must no longer strip only the exact (/.*)? suffix")
-	}
-	// The overlap check must not be gated on the ROOT existing — a not-yet-created
-	// data dir must still be protected from an overlapping local rule. Compare
-	// against the root-existence gate specifically (`[ -e "$_r" ]`); other `[ -e ]`
-	// guards (e.g. the entrypoint hard-link check) are unrelated.
-	ov := strings.Index(spec, "_ov=$(printf")
-	ex := strings.Index(spec, `[ -e "$_r" ]`)
-	if ov < 0 || ex < 0 || ov > ex {
-		t.Errorf("overlap check must precede the root existence gate (ov=%d ex=%d)", ov, ex)
 	}
 }

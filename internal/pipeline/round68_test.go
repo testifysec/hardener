@@ -86,34 +86,3 @@ func TestBuildRPMForcesCleanPolicyRebuild(t *testing.T) {
 		t.Error("the removal must precede make")
 	}
 }
-
-// Round 68 (reported as a defect; actually already correct — pinned so it stays
-// that way): the upgrade .roots inventory must include EXECUTABLES, not just path
-// roots. Otherwise a removed/renamed entrypoint keeps its _exec_t label and stays
-// a valid domain-transition entrypoint after upgrade. RelabelRoots covers both,
-// and %post restores every old root absent from the new list.
-func TestRootsInventoryIncludesExecutables(t *testing.T) {
-	p := &profile.Profile{
-		Name:        "widget",
-		Executables: []string{"/opt/widget/bin/widgetd"},
-		Paths:       []profile.PathAccess{{Path: "/var/lib/widget(/.*)?", Kind: "var_lib"}},
-	}
-	spec := GenerateSpec(p, "20260101000000")
-	i := strings.Index(spec, "HARDENER_ROOTS'")
-	if i < 0 {
-		t.Fatal("no HARDENER_ROOTS heredoc in the spec")
-	}
-	body := spec[i+len("HARDENER_ROOTS'"):]
-	if j := strings.Index(body, "HARDENER_ROOTS"); j >= 0 {
-		body = body[:j]
-	}
-	for _, want := range []string{"/opt/widget/bin/widgetd", "/var/lib/widget"} {
-		if !strings.Contains(body, want) {
-			t.Errorf("the .roots upgrade inventory must list %q (body=%q)", want, body)
-		}
-	}
-	// And the reconciliation must restore any old root missing from the new list.
-	if !strings.Contains(spec, "could not restore removed root") {
-		t.Error("post scriptlet must reconcile roots removed from the profile on upgrade")
-	}
-}

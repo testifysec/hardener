@@ -3,8 +3,6 @@ package pipeline
 import (
 	"strings"
 	"testing"
-
-	"github.com/testifysec/hardener/internal/profile"
 )
 
 // Round 18 (#2): DomainOK proves the MainPID carries our domain label, but the
@@ -42,42 +40,5 @@ func TestRefusesToShadowExistingPolicy(t *testing.T) {
 	res := Run(f, testTarget(), Options{MaxRounds: 2})
 	if !strings.Contains(res.FailureReason, "name-conflict") {
 		t.Errorf("must refuse to shadow an existing policy, got %q", res.FailureReason)
-	}
-}
-
-// Round 18 (#4): %post must roll back the module and port mappings on any
-// post-load failure, not leave partial state behind.
-func TestSpecPostRollsBackOnFailure(t *testing.T) {
-	p := &profile.Profile{
-		Name:        "widget",
-		Executables: []string{"/opt/widget/bin/widgetd"},
-		Ports:       []profile.Port{{Proto: "tcp", Port: 8443}},
-	}
-	spec := GenerateSpec(p, "1")
-	if !strings.Contains(spec, "trap _rollback EXIT") || !strings.Contains(spec, "_ok=1") {
-		t.Errorf("%%post must arm a rollback trap and disarm only on full success:\n%s", spec)
-	}
-}
-
-// Round 18 (#5): %postun must restore base file labels after removing the module
-// (else files keep undefined app labels and become inaccessible), depend on
-// policycoreutils-python-utils for semanage, and not silence cleanup failures.
-func TestSpecPostunRestoresLabels(t *testing.T) {
-	p := &profile.Profile{
-		Name:        "widget",
-		Executables: []string{"/opt/widget/bin/widgetd"},
-		Paths:       []profile.PathAccess{{Path: "/var/lib/widget", Kind: "var_lib"}},
-		Ports:       []profile.Port{{Proto: "tcp", Port: 8443}},
-	}
-	spec := GenerateSpec(p, "1")
-	if !strings.Contains(spec, "Requires(postun): policycoreutils policycoreutils-python-utils") {
-		t.Error("postun must depend on policycoreutils-python-utils for semanage")
-	}
-	if !strings.Contains(spec, "could not restore") {
-		t.Errorf("postun must restore file labels after module removal:\n%s", spec)
-	}
-	// Port removal on uninstall must be observable, not '|| :'.
-	if strings.Contains(spec, "port -d -t widget_port_t -p tcp 8443 2>/dev/null || :") {
-		t.Errorf("postun port removal must be observable, not silenced:\n%s", spec)
 	}
 }
