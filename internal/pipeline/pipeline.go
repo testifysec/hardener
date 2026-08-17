@@ -1088,11 +1088,21 @@ func installPolicy(r vm.Runner, p *profile.Profile, te, fc string) error {
 	if err := reconcileStalePorts(r, p); err != nil {
 		return err
 	}
+	// DELETE prior build outputs before compiling, exactly as buildRPM does. `make
+	// <app>.pp` is timestamp-driven and this directory is reused across rounds, so
+	// target-controlled Install/Setup/Exercise code — all of which runs before later
+	// compilations — could pre-create a FUTURE-dated <app>.pp here. make would then
+	// skip compilation and we would load and verify THAT policy while FinalTE and
+	// the shipped RPM describe the .te we just wrote (review finding — round 77).
+	// The same hole was closed on the packaging side in round 68; this is the
+	// verifier-side compile. `test -f` guards against make succeeding without output.
 	script := fmt.Sprintf(`set -e
-cd %s
-sudo make -f /usr/share/selinux/devel/Makefile %s.pp
-sudo semodule -i %s.pp
-`, vm.ShellQuote(dir), app, app)
+cd %[1]s
+sudo rm -rf tmp %[2]s.pp %[2]s.mod %[2]s.mod.fc
+sudo make -f /usr/share/selinux/devel/Makefile %[2]s.pp
+test -f %[2]s.pp
+sudo semodule -i %[2]s.pp
+`, vm.ShellQuote(dir), app)
 	if _, err := r.Run(script); err != nil {
 		return err
 	}

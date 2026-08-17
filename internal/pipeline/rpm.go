@@ -130,10 +130,19 @@ func GenerateSpec(p *profile.Profile, revision string) string {
 	// under a declared root was already relabeled before the check fired, and
 	// rollback could not restore the label its other links expect (review finding).
 	// A non-1 or unstattable count aborts before anything moves.
+	// Each entrypoint must EXIST and be stat-able. %post unconditionally runs
+	// restorecon+stat on every entrypoint, so a missing binary failed only AFTER rpm
+	// committed the payload and NEVRA — making a retry of the same NEVRA a no-op
+	// (review finding — round 77). Skipping absent entrypoints here (as the earlier
+	// [ -e ] guard did) just deferred that failure past the point of no return; the
+	// entrypoints belong to the APPLICATION package, which must already be installed
+	// for this policy package to confine anything.
 	for _, exe := range p.Executables {
 		fmt.Fprintf(&preflight,
 			"_e=%[1]s\n"+
-				"if [ -e \"$_e\" ]; then _lc=$(stat -c '%%h' -- \"$_e\" 2>/dev/null); case \"$_lc\" in 1) : ;; *) printf 'ERROR: entrypoint %%s has hard-link count %%s (want exactly 1); refusing to relabel a shared inode\\n' \"$_e\" \"$_lc\" >&2; exit 1 ;; esac; fi\n",
+				"if [ ! -e \"$_e\" ]; then printf 'ERROR: entrypoint %%s does not exist; install the application before its policy package\\n' \"$_e\" >&2; exit 1; fi\n"+
+				"_lc=$(stat -c '%%h' -- \"$_e\" 2>/dev/null) || { printf 'ERROR: cannot stat entrypoint %%s; refusing\\n' \"$_e\" >&2; exit 1; }\n"+
+				"case \"$_lc\" in 1) : ;; *) printf 'ERROR: entrypoint %%s has hard-link count %%s (want exactly 1); refusing to relabel a shared inode\\n' \"$_e\" \"$_lc\" >&2; exit 1 ;; esac\n",
 			vm.ShellQuote(exe))
 	}
 	// PASS 2 — relabel the declared file-context roots and VERIFY the resulting
@@ -266,6 +275,27 @@ func GenerateSpec(p *profile.Profile, revision string) string {
 			"if semanage port -d -p \"$_pp\" \"$_pn\" 2>/dev/null; then _pruned=\"$_pruned $_row\"; "+
 			"else echo \"ERROR: could not prune stale port $_row from %[1]s — refusing to leave an undeclared bind privilege\" >&2; exit 1; fi; done\n",
 		appPortType, desired, app)
+	// portOwnership is the fresh-install guard against a DIFFERENTLY-NAMED foreign
+	// module already owning <app>_port_t. It is emitted ONLY when the profile
+	// declares ports. A portless profile never defines that type and (since round
+	// 76) reconciliation leaves mappings it cannot prove were ours alone, so there
+	// is nothing to protect — rejecting a legitimate foreign owner would just block
+	// an install for no reason (review finding — round 77). semanage (not seinfo)
+	// keeps this portable to a minimal host that lacks setools.
+	portOwnership := ""
+	if len(p.Ports) > 0 {
+		portOwnership = fmt.Sprintf(
+			"    # A differently-named foreign module can already own our PORT type; the\n"+
+				"    # reconciliation below would DELETE its mappings (mistaking them for our\n"+
+				"    # own stale ones) BEFORE semodule -i fails on the duplicate type. Refuse\n"+
+				"    # first: on a fresh install we have never created %[1]s.\n"+
+				"    _pt=\"$(semanage port -l 2>/dev/null)\" || { echo \"ERROR: 'semanage port -l' failed on fresh install; cannot confirm %[1]s is unclaimed — refusing\" >&2; exit 1; }\n"+
+				"    if printf '%%s\\n' \"$_pt\" | awk -v t=%[1]s '$1==t{f=1} END{exit !f}'; then\n"+
+				"        echo \"ERROR: SELinux port type %[1]s already has mappings but this is a fresh install; a foreign module owns it — refusing to disturb it. Build with a distinct name.\" >&2\n"+
+				"        exit 1\n"+
+				"    fi\n",
+			appPortType)
+	}
 	// portsContent is this build's declared proto:port set, shipped as <app>.ports
 	// so the NEXT upgrade can tell our mappings from a foreign module's.
 	var portsContent strings.Builder
@@ -388,14 +418,7 @@ if [ "$1" = 1 ]; then
         echo "ERROR: a SELinux module named %[1]s already exists, but this is a fresh install; refusing to shadow a foreign module. Remove it first or build with a distinct name." >&2
         exit 1
     fi
-    # A differently-named foreign module can already own our PORT type; the port
-    # reconciliation in %%post would delete ITS mappings before semodule -i fails.
-    _prept="$(semanage port -l 2>/dev/null)" || { echo "ERROR: 'semanage port -l' failed; cannot confirm %[7]s is unclaimed — refusing" >&2; exit 1; }
-    if printf '%%s\n' "$_prept" | awk -v t=%[7]s '$1==t{f=1} END{exit !f}'; then
-        echo "ERROR: SELinux port type %[7]s already has mappings but this is a fresh install; a foreign module owns it — refusing to disturb it. Build with a distinct name." >&2
-        exit 1
-    fi
-fi
+%[13]sfi
 # On upgrade, stash the OLD roots list BEFORE the new payload overwrites it, so
 # %%post can restore base labels on roots the new profile no longer claims
 # (review finding). The stash lives in the package-owned, root-only directory
@@ -488,20 +511,7 @@ if [ "$_op" = 1 ]; then
         echo "ERROR: a SELinux module named %[1]s already exists, but this is a fresh install; refusing to shadow a foreign module. Remove it first or build with a distinct name." >&2
         exit 1
     fi
-    # A DIFFERENTLY-NAMED foreign module can already own our PORT type (%[7]s)
-    # even when no same-name module exists — the module-name check above misses
-    # it, unlike the verifier's all-generated-types conflict check. On a fresh
-    # install we have never created %[7]s, so any existing mapping under it is
-    # foreign; the reconciliation below would DELETE that mapping (mistaking it
-    # for our own stale one) BEFORE semodule -i fails on the duplicate type,
-    # corrupting unrelated policy. Refuse first. semanage (not seinfo) keeps this
-    # portable to a minimal host that lacks setools (review finding).
-    _pt="$(semanage port -l 2>/dev/null)" || { echo "ERROR: 'semanage port -l' failed on fresh install; cannot confirm %[7]s is unclaimed — refusing" >&2; exit 1; }
-    if printf '%%s\n' "$_pt" | awk -v t=%[7]s '$1==t{f=1} END{exit !f}'; then
-        echo "ERROR: SELinux port type %[7]s already has mappings but this is a fresh install; a foreign module owns it — refusing to disturb it. Build with a distinct name." >&2
-        exit 1
-    fi
-else
+%[13]selse
     # Upgrade: the pre-upgrade module snapshot was taken in %%pre, BEFORE rpm
     # committed the new payload/NEVRA, so a snapshot failure aborted the whole
     # transaction cleanly instead of stranding us here with new files on disk and
@@ -645,5 +655,5 @@ fi
 %%{_datadir}/selinux/hardener/%[1]s.fc
 %%{_datadir}/selinux/hardener/%[1]s.roots
 %%{_datadir}/selinux/hardener/%[1]s.ports
-`, app, relabel.String(), ports.String(), portsDel.String(), revision, restore.String(), appPortType, reconcile, rootsContent.String(), preflight.String(), restoreStrict.String(), portsContent.String())
+`, app, relabel.String(), ports.String(), portsDel.String(), revision, restore.String(), appPortType, reconcile, rootsContent.String(), preflight.String(), restoreStrict.String(), portsContent.String(), portOwnership)
 }
