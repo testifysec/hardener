@@ -24,14 +24,24 @@ func TestPortlessUpgradeDoesNotPruneForeignMappings(t *testing.T) {
 	spec := GenerateSpec(portless, "20260101000000")
 
 	// Reconciliation must consult the previous package's declared port inventory.
+	// Round 80 corrected the response: an unprovable mapping is still never
+	// DELETED, but the install now ABORTS rather than warning and continuing —
+	// leaving it active would grant name_bind on the whole port type unverified.
 	for _, want := range []string{
 		"widget.oldports",
-		"was not declared by the previous widget package",
-		"leaving it alone rather than deleting",
+		"was not declared by this widget package or the previous one",
+		"refusing to install",
 	} {
 		if !strings.Contains(spec, want) {
 			t.Errorf("reconciliation must verify prior port ownership; missing %q", want)
 		}
+	}
+	if strings.Contains(spec, "leaving it alone rather than deleting") {
+		t.Error("an unprovable mapping must abort the install, not merely warn")
+	}
+	// .oldports is consumed only on upgrade; a fresh install removes the stale file.
+	if !strings.Contains(spec, `if [ "$_op" = 1 ]; then rm -f %{_datadir}/selinux/hardener/widget.oldports`) {
+		t.Error("a fresh install must discard a stale .oldports inventory rather than trust it")
 	}
 	// The inventory must be shipped, stashed like .roots, and packaged.
 	if !strings.Contains(spec, "cat > %{buildroot}%{_datadir}/selinux/hardener/widget.ports") {

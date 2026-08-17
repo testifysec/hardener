@@ -142,6 +142,44 @@ func isSharedSystemdTree(root string) bool {
 			return true
 		}
 	}
+	return isUserSystemdTree(root)
+}
+
+// userHomeBases are the roots under which per-user home directories live. A
+// SYSTEM daemon's confined paths never belong inside a user's home, and every
+// per-user systemd unit directory lives there — so claiming any of these (or
+// anything under them) is refused outright. That also covers the per-user unit
+// paths by construction, without having to enumerate usernames.
+var userHomeBases = []string{"/home", "/root", "/var/home"}
+
+// userSystemdSuffixes are systemd's per-user unit load-path tails. They are
+// matched anywhere in the path so an unusual home location (/srv/people/bob,
+// /export/home/bob) is covered too.
+var userSystemdSuffixes = []string{
+	"/.config/systemd", "/.local/share/systemd", "/.local/state/systemd",
+	"/.config/environment.d",
+}
+
+// isUserSystemdTree reports whether root is, is under, or is an ancestor of a
+// PER-USER systemd unit directory (/home/<user>/.config/systemd/user and friends).
+// sharedSystemdTrees lists absolute paths and so could never cover these — the
+// username sits in the middle — and a manifest NAMED after the user satisfied the
+// ownership heuristic, so it could claim them without owned:true and recursively
+// relabel every one of that user's units (review finding — round 80).
+func isUserSystemdTree(root string) bool {
+	root = strings.TrimRight(root, "/")
+	// Any claim inside a home tree, or on the home tree itself.
+	for _, b := range userHomeBases {
+		if root == b || strings.HasPrefix(root, b+"/") || strings.HasPrefix(b+"/", root+"/") {
+			return true
+		}
+	}
+	// Per-user systemd dirs outside the standard home bases.
+	for _, s := range userSystemdSuffixes {
+		if strings.HasSuffix(root, s) || strings.Contains(root, s+"/") {
+			return true
+		}
+	}
 	return false
 }
 
