@@ -78,6 +78,15 @@ type Result struct {
 	// scanner) are declared-and-labeled, not exercised. The predicate reports both
 	// sets so a passing verdict cannot imply coverage it does not have.
 	ObservedEntrypoints []string
+	// PackageChecks are properties proven by actually INSTALLING the built RPM on
+	// the verifier and then erasing it: the module reaches the store at the
+	// third-party priority, the entrypoints and declared roots really receive the
+	// app types, the declared ports are mapped, and the erase removes all of it and
+	// restores base labels. Distinct from StaticChecks, which reason about the
+	// loaded policy; these test the PACKAGE that has to apply it on a host nobody
+	// can reach. PackageOK is true only when every check passed.
+	PackageChecks []PackageCheck
+	PackageOK     bool
 	// Conformance is filled by the caller per party class; rendered in the report.
 	Party             string
 	ConformanceUndecl []string
@@ -949,6 +958,26 @@ func Run(r vm.Runner, t *target.Target, opts Options) *Result {
 			return fail("rpm-digest", fmt.Errorf("sha256sum %s: %v", rpm, err))
 		}
 		res.RPMSHA256 = fields[0]
+
+		// Prove the PACKAGE works, not just the policy. Everything above verified
+		// that the generated policy confines the workload; none of it touched the
+		// scriptlets that have to apply that policy on the customer's host. Install
+		// the RPM here, check it delivers the confinement the verdict claims, then
+		// erase it and check it cleans up. This is the last thing the test chamber
+		// can do that the destination cannot: a package that fails to install on a
+		// disconnected system is the same casualty as an app that will not start.
+		pkgChecks, perr := verifyPackage(r, p, rpm)
+		res.PackageChecks = pkgChecks
+		if perr != nil {
+			return fail("package-verify", perr)
+		}
+		res.PackageOK = true
+		for _, c := range pkgChecks {
+			if !c.Passed {
+				res.PackageOK = false
+				return fail("package-verify", fmt.Errorf("%s: %s", c.Name, c.Detail))
+			}
+		}
 	}
 	// Enforcement can finish with EnforceOK==false (residual denials, no domain
 	// proof) and fall through here WITHOUT going via fail(), leaving the module,
