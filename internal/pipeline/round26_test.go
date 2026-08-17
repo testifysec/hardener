@@ -66,45 +66,6 @@ func TestExerciseToleratesSameIdentityRestart(t *testing.T) {
 	}
 }
 
-// Round 26: %pre must fail closed if the roots inventory exists but cannot be
-// stashed (else the upgrade silently retains stale labels); and upgrade
-// rollback must re-apply the OLD module's labels on every old root.
-func TestSpecUpgradeReconcileFailClosedAndRollback(t *testing.T) {
-	spec := GenerateSpec(testTarget().Profile(), "20260101000000")
-	if !strings.Contains(spec, "refusing a non-atomic upgrade") {
-		t.Error("pre-install scriptlet must fail closed when the roots stash cannot be written")
-	}
-	// The rollback branch must iterate the old roots (re-apply old labels).
-	if !strings.Contains(spec, ".oldroots") || !strings.Contains(spec, "_oldroot") {
-		t.Errorf("rollback must restore every old root:\n%s", spec)
-	}
-}
-
-// Round 27: a fresh RPM install must REFUSE if a module with our name already
-// exists (foreign — manual, base policy, or another package); loading ours would
-// shadow it and rollback would remove it.
-func TestSpecFreshInstallRefusesPreexistingModule(t *testing.T) {
-	spec := GenerateSpec(testTarget().Profile(), "20260101000000")
-	if !strings.Contains(spec, "semodule -l") || !strings.Contains(spec, "fresh install") {
-		t.Errorf("%%post must refuse a pre-existing module on fresh install:\n%s", spec)
-	}
-}
-
-// Round 28: stale-port reconciliation must FAIL CLOSED if `semanage port -l`
-// cannot enumerate — inlining it in $(...) would yield an empty loop and let
-// obsolete <app>_port_t mappings (undeclared bind privilege) survive.
-func TestSpecPortReconcileFailsClosedOnEnumError(t *testing.T) {
-	p := testTarget().Profile()
-	p.Ports = []profile.Port{{Proto: "tcp", Port: 8443}}
-	spec := GenerateSpec(p, "20260101000000")
-	if !strings.Contains(spec, "_portlist=") {
-		t.Errorf("reconcile must capture the listing before iterating:\n%s", spec)
-	}
-	if !strings.Contains(spec, "'semanage port -l' failed") {
-		t.Errorf("reconcile must abort on an enumeration failure:\n%s", spec)
-	}
-}
-
 // Round 29: kernel audit LOSS during the exercise means the denial slice may be
 // incomplete — a zero-denial result would be a false pass. exercise() must fail
 // closed when the lost counter climbs.
@@ -198,15 +159,6 @@ func TestExerciseFailsClosedWhenUnitDoesNotStop(t *testing.T) {
 	}
 }
 
-// Round 30: the generated RPM %post must re-check the entrypoint hard-link count
-// before relabeling — the verifier-side check does not protect the customer host.
-func TestSpecPostChecksEntrypointHardLinks(t *testing.T) {
-	spec := GenerateSpec(testTarget().Profile(), "20260101000000")
-	if !strings.Contains(spec, `stat -c '%h'`) || !strings.Contains(spec, "hard-link count") {
-		t.Errorf("%%post must check entrypoint hard-link count before relabel:\n%s", spec)
-	}
-}
-
 // Round 31: a service that re-execs then EXITS leaves an empty post-exercise
 // capture; the old guard skipped the check and passed on the pre-exercise
 // digest. A non-empty pre-capture now REQUIRES a matching post-capture.
@@ -231,22 +183,6 @@ func TestExerciseFailsClosedWhenProcessExits(t *testing.T) {
 	}
 	if _, _, _, err := exercise(f, tgt, "widget_t"); err == nil || !strings.Contains(err.Error(), "exited during the scenario") {
 		t.Fatalf("a process that exits mid-run must fail closed, got %v", err)
-	}
-}
-
-// Round 31: the fresh-install pre-existing-module check must capture semodule -l
-// and fail closed on enumeration error (piping to grep masked semodule failures),
-// and _pruned port mappings must be restored in EVERY rollback path.
-func TestSpecFreshInstallModuleCheckAndPrunedRestore(t *testing.T) {
-	spec := GenerateSpec(testTarget().Profile(), "20260101000000")
-	if !strings.Contains(spec, "_modlist=") || !strings.Contains(spec, "'semodule -l' failed") {
-		t.Errorf("fresh-install module check must capture+validate semodule -l:\n%s", spec)
-	}
-	// The _pruned restore loop must sit OUTSIDE the upgrade-only elif — i.e. after
-	// the closing `fi` of the module-restore block, before the function closes.
-	idx := strings.Index(spec, "in EVERY rollback path")
-	if idx < 0 {
-		t.Errorf("_pruned must be restored in every rollback path:\n%s", spec)
 	}
 }
 

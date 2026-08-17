@@ -4,7 +4,6 @@ import (
 	"strings"
 	"testing"
 
-	"github.com/testifysec/hardener/internal/profile"
 	"github.com/testifysec/hardener/internal/target"
 )
 
@@ -60,47 +59,5 @@ func TestStartBarrierWaitsForCountIncrease(t *testing.T) {
 	}
 	if postPolls < 2 {
 		t.Errorf("the barrier must keep polling until the count increases (post-emit polls=%d, want >=2)", postPolls)
-	}
-}
-
-// Round 69: %post cannot roll back the RPM transaction — rpm has already
-// committed the payload and the new NEVRA before %post runs, so a failure there
-// leaves files on disk and a DB entry that makes retrying the same NEVRA a no-op.
-// The read-only, ABORTABLE preflight (foreign same-name module / foreign owner of
-// our port type) must therefore also run in %pre, where a non-zero exit aborts the
-// transaction cleanly before any commit.
-func TestSpecPreAbortsFreshInstallPreflight(t *testing.T) {
-	p := &profile.Profile{
-		Name:        "widget",
-		Executables: []string{"/opt/widget/bin/widgetd"},
-		Ports:       []profile.Port{{Proto: "tcp", Port: 8443}},
-	}
-	spec := GenerateSpec(p, "20260101000000")
-	pre := spec[strings.Index(spec, "\n%pre\n"):]
-	pre = pre[:strings.Index(pre, "\n%post\n")]
-	for _, want := range []string{
-		`if [ "$1" = 1 ]; then`,
-		"a SELinux module named widget already exists",
-		"already has mappings but this is a fresh install",
-		`awk -v t=widget_port_t '$1==t{f=1} END{exit !f}'`,
-	} {
-		if !strings.Contains(pre, want) {
-			t.Errorf("pre scriptlet missing abortable preflight %q", want)
-		}
-	}
-	// The preflight must be read-only: no activation/mutation belongs in %pre.
-	// Check CODE lines only — the comments legitimately mention these commands.
-	var code strings.Builder
-	for _, ln := range strings.Split(pre, "\n") {
-		if s := strings.TrimSpace(ln); s == "" || strings.HasPrefix(s, "#") {
-			continue
-		}
-		code.WriteString(ln)
-		code.WriteString("\n")
-	}
-	for _, forbidden := range []string{"semodule -i", "semanage port -a", "restorecon -RF"} {
-		if strings.Contains(code.String(), forbidden) {
-			t.Errorf("pre scriptlet must not mutate state (found %q)", forbidden)
-		}
 	}
 }

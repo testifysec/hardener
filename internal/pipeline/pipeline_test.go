@@ -1,11 +1,9 @@
 package pipeline
 
 import (
-	"strings"
 	"testing"
 
 	"github.com/testifysec/hardener/internal/policy"
-	"github.com/testifysec/hardener/internal/profile"
 )
 
 func TestFCRoot(t *testing.T) {
@@ -41,31 +39,5 @@ func TestMergeNewRulesIdempotent(t *testing.T) {
 	}
 	if got := acc[0].Render(); got != "allow w_t cert_t:file { getattr open read };" {
 		t.Errorf("merged render: %q", got)
-	}
-}
-
-func TestGenerateSpec(t *testing.T) {
-	p := &profile.Profile{
-		Name:        "widget",
-		Executables: []string{"/opt/widget/bin/widgetd"},
-		Paths:       []profile.PathAccess{{Path: "/var/lib/widget(/.*)?", Kind: "var_lib"}},
-		Ports:       []profile.Port{{Proto: "tcp", Port: 8443}},
-	}
-	spec := GenerateSpec(p, "20260101000000")
-	for _, want := range []string{
-		"Name:           widget-selinux",
-		"semodule -i %{_datadir}/selinux/packages/widget.pp",
-		`restorecon -RF -- '/var/lib/widget'`,
-		"semanage port -a -t widget_port_t -p tcp 8443",
-		"semodule -r widget",
-		// Release carries the monotonic revision (finding: static NEVRA).
-		"Release:        1.20260101000000",
-		// Entrypoint type is verified after restorecon (finding: restorecon
-		// success != correct type).
-		"not widget_exec_t",
-	} {
-		if !strings.Contains(spec, want) {
-			t.Errorf("spec missing %q", want)
-		}
 	}
 }

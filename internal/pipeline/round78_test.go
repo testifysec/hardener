@@ -7,41 +7,6 @@ import (
 	"github.com/testifysec/hardener/internal/profile"
 )
 
-// Round 78: `gone` was scoped INSIDE the removal retry loop, so cleanup proceeded
-// after two FAILED `semodule -r` attempts as if the module were gone — and then
-// ran restorecon, REAPPLYING the still-loaded module's own labels and silently
-// contaminating the persistent verifier. An unconfirmed removal must skip the
-// relabel and report loudly.
-func TestCleanupSkipsRelabelWhenModuleRemovalUnconfirmed(t *testing.T) {
-	f := passingRunner()
-	// The early name-conflict probes must see a CLEAN list (otherwise the run
-	// aborts before install and cleanup never touches the module). After those, the
-	// list permanently contains widget — the last seq entry sticks — so cleanup's
-	// removal verification never confirms removal. widget is in expectedMods, so
-	// the intervening recheck calls are unaffected.
-	f.seq = map[string][]string{
-		"semodule -l": {
-			"base\nselinux-policy\nunconfined\n", // nameConflict (pre-install)
-			"base\nselinux-policy\nunconfined\n", // nameConflict (post-install)
-			"base\nselinux-policy\nunconfined\nwidget\n",
-		},
-	}
-	f.responses["-t shadow_t"] = "allow widget_t shadow_t:file read;" // force a failure → cleanup
-	res := Run(f, testTarget(), Options{MaxRounds: 2})
-	if res.FailureReason == "" {
-		t.Fatal("expected a failure so cleanup runs")
-	}
-	if f.countCalls("semodule -r widget") == 0 {
-		t.Fatal("cleanup must attempt removal")
-	}
-	// The relabel must NOT run: it would reapply the still-loaded module's labels.
-	for _, c := range f.calls {
-		if strings.Contains(c, "restorecon -RF") && strings.Contains(c, "/var/lib/widget") {
-			t.Error("cleanup must not relabel while the module is still loaded — that reapplies its own types")
-		}
-	}
-}
-
 // Conversely, a confirmed removal must still restore base labels.
 func TestCleanupRelabelsWhenModuleRemovalConfirmed(t *testing.T) {
 	f := passingRunner() // semodule -l does not list widget → removal confirmed

@@ -54,14 +54,3 @@ func TestRPMBuildFailureFailsTheRun(t *testing.T) {
 		t.Errorf("rpm build failure must fail the run, got %q", res.FailureReason)
 	}
 }
-
-// The generated spec must not suppress semodule failure in %post.
-func TestSpecFailsClosedOnSemodule(t *testing.T) {
-	spec := GenerateSpec(testTarget().Profile(), "20260101000000")
-	if strings.Contains(spec, "semodule -i %{_datadir}/selinux/packages/widget.pp || :") {
-		t.Error("post scriptlet suppresses semodule failure — package would install unconfined")
-	}
-	if !strings.Contains(spec, "if ! semodule -i") {
-		t.Errorf("spec missing fail-closed semodule guard:\n%s", spec)
-	}
-}

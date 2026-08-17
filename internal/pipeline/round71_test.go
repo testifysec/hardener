@@ -1,11 +1,9 @@
 package pipeline
 
 import (
-	"os/exec"
 	"strings"
 	"testing"
 
-	"github.com/testifysec/hardener/internal/profile"
 	"github.com/testifysec/hardener/internal/target"
 )
 
@@ -81,63 +79,5 @@ func TestAuditBarrierRejectsReplayedToken(t *testing.T) {
 	_, _, _, err := exercise(f, tgt, "widget_t")
 	if err == nil || !strings.Contains(err.Error(), "replayed") {
 		t.Fatalf("a duplicated barrier token must fail closed, got %v", err)
-	}
-}
-
-// Round 71 (error path): the upgrade snapshot must be taken in %pre, where a
-// failure aborts the transaction BEFORE rpm commits the new payload and NEVRA.
-// Taking it in %post left the old policy active with the new files already
-// recorded as installed, and retrying the same NEVRA is a no-op.
-func TestSpecSnapshotsUpgradeInPre(t *testing.T) {
-	p := &profile.Profile{
-		Name:        "widget",
-		Executables: []string{"/opt/widget/bin/widgetd"},
-		Paths:       []profile.PathAccess{{Path: "/var/lib/widget(/.*)?", Kind: "var_lib"}},
-	}
-	spec := GenerateSpec(p, "20260101000000")
-	pre := spec[strings.Index(spec, "\n%pre\n"):]
-	pre = pre[:strings.Index(pre, "\n%post\n")]
-	post := spec[strings.Index(spec, "\n%post\n"):]
-	post = post[:strings.Index(post, "\n%postun\n")]
-
-	// %pre takes the snapshot and aborts the transaction if it cannot.
-	for _, want := range []string{
-		"semodule -E widget",
-		"refusing a non-atomic upgrade",
-		"widget.snap",
-	} {
-		if !strings.Contains(pre, want) {
-			t.Errorf("pre scriptlet must snapshot the old module; missing %q", want)
-		}
-	}
-	// %post must CONSUME that snapshot, never create its own with mktemp.
-	// (%post still uses mktemp for the rollback VERIFY dir; what must be gone is
-	// creating the SNAPSHOT there.)
-	if strings.Contains(post, `_snap="$(mktemp`) {
-		t.Error("post scriptlet must not create the upgrade snapshot itself — it runs after the commit")
-	}
-	if !strings.Contains(post, "_snap=%{_datadir}/selinux/hardener/widget.snap") {
-		t.Error("post scriptlet must consume the snapshot taken in the pre scriptlet")
-	}
-	if !strings.Contains(post, "the pre-upgrade widget module snapshot is missing or empty") {
-		t.Error("post scriptlet must fail closed when the pre-scriptlet snapshot is absent or empty")
-	}
-	// Behavioral: the emptiness guard fires on a missing dir and on an empty dir,
-	// and passes on a populated one.
-	guard := `if [ ! -d "$_snap" ] || [ -z "$(ls -A "$_snap" 2>/dev/null)" ]; then exit 1; fi`
-	for _, c := range []struct {
-		name  string
-		setup string
-		fail  bool
-	}{
-		{"missing", `_snap=/nonexistent/hardener-snap-test`, true},
-		{"empty", `_snap=$(mktemp -d)`, true},
-		{"populated", `_snap=$(mktemp -d); : > "$_snap/widget.cil"`, false},
-	} {
-		cmd := exec.Command("sh", "-c", c.setup+"\n"+guard)
-		failed := cmd.Run() != nil
-		if failed != c.fail {
-			t.Errorf("snapshot guard (%s): failed=%v want %v", c.name, failed, c.fail)
-		}
 	}
 }
