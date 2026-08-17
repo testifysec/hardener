@@ -616,3 +616,46 @@ ports:
 		t.Errorf("tcp and udp on the same port number must load: %v", err)
 	}
 }
+
+// Round 78: the protected systemd list enumerated only the ".../system" and
+// ".../user" directories, missing the SIBLING unit-load directories systemd
+// actually reads — /run/systemd/transient, the .control trees, the generator
+// trees, the .attached trees. None of those are under or above ".../system", so a
+// claim like /run/systemd/transient(/.*)? with owned:true passed validation and
+// would recursively relabel every transient unit. The list now mirrors
+// `systemd-analyze unit-paths` from the verifier. (review finding)
+func TestLoadRejectsAllSystemdUnitLoadDirs(t *testing.T) {
+	tmpl := `name: widget
+install: "true"
+unit: widget.service
+exercise: "true"
+executables:
+  - /opt/widget/bin/widgetd
+paths:
+  - { path: "%s(/.*)?", kind: conf, owned: true }
+`
+	// Every directory systemd loads units from must be refused even with owned:true.
+	for _, dir := range []string{
+		"/run/systemd/transient",
+		"/run/systemd/system.control",
+		"/etc/systemd/system.control",
+		"/run/systemd/generator",
+		"/run/systemd/generator.early",
+		"/run/systemd/generator.late",
+		"/etc/systemd/system.attached",
+		"/run/systemd/system.attached",
+		"/var/run/systemd/transient",
+		"/run/user",
+		// still-protected originals
+		"/etc/systemd/system",
+		"/usr/lib/systemd/system",
+	} {
+		if _, err := Load(write(t, fmt.Sprintf(tmpl, dir))); err == nil {
+			t.Errorf("claiming systemd unit-load dir %q must be rejected even with owned: true", dir)
+		}
+	}
+	// A genuinely app-owned runtime dir is still allowed.
+	if _, err := Load(write(t, fmt.Sprintf(tmpl, "/run/widget"))); err != nil {
+		t.Errorf("a bounded app runtime dir must still load: %v", err)
+	}
+}

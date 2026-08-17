@@ -85,6 +85,14 @@ var broadSystemRoots = map[string]bool{
 // files. No manifest may claim them or anything under them — a recursive relabel
 // would rewrite all units on the host — and the exact-match broadSystemRoots
 // denylist could not enumerate every depth (review finding). Checked by prefix.
+// The list below is systemd's OWN unit-load path, taken from `systemd-analyze
+// unit-paths` (and `--user`) on the verifier rather than guessed. Enumerating only
+// the ".../system" and ".../user" directories missed the SIBLING load
+// directories — /run/systemd/transient, /run/systemd/system.control,
+// /etc/systemd/system.control, the generator trees, the .attached trees — none of
+// which are under or above ".../system", so a claim like
+// /run/systemd/transient(/.*)? with owned:true passed validation and would
+// recursively relabel every transient unit (review finding — round 78).
 var sharedSystemdTrees = []string{
 	"/etc/systemd/system", "/etc/systemd/user",
 	"/usr/lib/systemd/system", "/usr/lib/systemd/user",
@@ -93,12 +101,32 @@ var sharedSystemdTrees = []string{
 	// here, so it is as shared as /usr/lib and must not be claimable either
 	// (review finding).
 	"/usr/local/lib/systemd/system", "/usr/local/lib/systemd/user",
+	"/usr/share/systemd/user", "/usr/local/share/systemd/user",
+	"/etc/xdg/systemd/user",
 	"/lib/systemd/system", "/lib/systemd/user",
 	"/run/systemd/system", "/run/systemd/user",
+	// Sibling unit-load directories under the same parents. `.control` holds
+	// runtime property drop-ins, `transient` holds systemd-run units, the
+	// generator trees hold generated units, and `.attached` holds portable-service
+	// units — all are loaded as units, so relabeling any of them rewrites units
+	// that are not ours.
+	"/etc/systemd/system.control", "/run/systemd/system.control",
+	"/run/systemd/user.control",
+	"/run/systemd/transient",
+	"/run/systemd/generator", "/run/systemd/generator.early", "/run/systemd/generator.late",
+	"/etc/systemd/system.attached", "/run/systemd/system.attached",
+	// Per-user runtime managers live under /run/user/<uid>/systemd; the whole
+	// tree is systemd's, never an app's.
+	"/run/user",
 	// On RHEL /var/run is a symlink to /run, so a claim spelled with /var/run
 	// must be rejected too — a path string can't resolve the symlink (review
 	// finding).
 	"/var/run/systemd/system", "/var/run/systemd/user",
+	"/var/run/systemd/system.control", "/var/run/systemd/user.control",
+	"/var/run/systemd/transient",
+	"/var/run/systemd/generator", "/var/run/systemd/generator.early", "/var/run/systemd/generator.late",
+	"/var/run/systemd/system.attached",
+	"/var/run/user",
 }
 
 // isSharedSystemdTree reports whether root is, is UNDER, or is an ANCESTOR of a

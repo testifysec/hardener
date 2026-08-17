@@ -224,10 +224,11 @@ func Run(r vm.Runner, t *target.Target, opts Options) *Result {
 				_, _ = r.Run(fmt.Sprintf("sudo semanage port -d -p %s %d 2>/dev/null || true", port.Proto, port.Port))
 			}
 		}
-		for attempt := 0; attempt < 2; attempt++ {
+		removed := false
+		for attempt := 0; attempt < 2 && !removed; attempt++ {
 			_, _ = r.Run(fmt.Sprintf("sudo semodule -r %s 2>/dev/null || true", appName))
 			out, err := r.Run("sudo semodule -l 2>/dev/null")
-			if err != nil {
+			if err != nil || strings.TrimSpace(out) == "" {
 				continue // could not verify; retry the removal
 			}
 			gone := true
@@ -237,9 +238,19 @@ func Run(r vm.Runner, t *target.Target, opts Options) *Result {
 					break
 				}
 			}
-			if gone {
-				break
-			}
+			removed = gone
+		}
+		// `gone` was scoped INSIDE the loop, so cleanup proceeded after two failed
+		// removals as if the module were gone — and the restorecon below then
+		// REAPPLIED that still-loaded module's labels, contaminating the persistent
+		// verifier (review finding — round 78). Restoring base labels only makes
+		// sense once the module (and its file-contexts) are actually gone; with the
+		// module still loaded, restorecon reapplies the app types. Report loudly and
+		// skip the relabel instead. Reuse is already blocked for this app: the next
+		// run's nameConflict check refuses to shadow the leftover module.
+		if !removed {
+			opts.Log("[%s] CRITICAL: the %s policy module could not be removed from the verifier; leaving file labels untouched (a relabel would reapply the module's own types). The verifier is CONTAMINATED — remove it manually before reusing this box: sudo semodule -r %s", t.Name, appName, appName)
+			return
 		}
 		for _, root := range RelabelRoots(p) {
 			q := vm.ShellQuote(root)
@@ -1157,6 +1168,19 @@ sudo semodule -i %[2]s.pp
 			return fmt.Errorf("descendant %s under declared root %s is not labeled %s — a more-specific file-context rule is overriding it; refusing to sign a mislabeled claim", d, root, wantType)
 		}
 	}
+	// The scan above only sees objects that EXIST. A more-specific BASE-policy rule
+	// beneath an EMPTY or not-yet-created declared root has nothing to match yet, so
+	// it passes — and then every file the app creates there gets the base type while
+	// the signed result claims the root is confined (review finding — round 78). The
+	// local-customization check below only covers `semanage fcontext -C` entries, not
+	// base policy. So inspect the compiled file_contexts directly: any rule whose
+	// LITERAL STEM lies strictly under a declared root, and whose type is not one of
+	// ours, would win on some path we claim. Our own module's entries are excluded by
+	// type — after installation the file_contexts contains them, and on a persistent
+	// verifier it also contains earlier hardener modules' entries.
+	if err := checkBaseRulesUnderRoots(r, p); err != nil {
+		return err
+	}
 	// Verifying only the ROOT's label misses a more-specific file_contexts.local
 	// rule that overrides a DESCENDANT while the root still passes (review
 	// finding). Walking a whole tree is impractical and collides with legitimately
@@ -1869,6 +1893,60 @@ func fcRoot(pattern string) string {
 		pattern = strings.TrimSuffix(pattern, suffix)
 	}
 	return pattern
+}
+
+// checkBaseRulesUnderRoots rejects a base-policy file-context rule that would
+// apply to paths STRICTLY UNDER one of our declared roots. Unlike the descendant
+// scan, this is independent of what currently exists on disk, so it also protects
+// a root the app has not created yet. Rules carrying one of OUR generated types
+// are skipped: after install the compiled file_contexts contains our own entries
+// (and, on a persistent verifier, earlier hardener modules' entries too).
+func checkBaseRulesUnderRoots(r vm.Runner, p *profile.Profile) error {
+	roots := map[string]bool{}
+	for _, pa := range p.Paths {
+		if root := fcRoot(pa.Path); root != "" {
+			roots[strings.TrimRight(root, "/")] = true
+		}
+	}
+	if len(roots) == 0 {
+		return nil
+	}
+	ours := map[string]bool{}
+	for _, t := range generatedTypes(p) {
+		ours[t] = true
+	}
+	out, err := r.Run("sudo cat /etc/selinux/targeted/contexts/files/file_contexts")
+	if err != nil {
+		return fmt.Errorf("could not read base file_contexts to check for rules under the declared roots: %w", err)
+	}
+	for _, line := range strings.Split(out, "\n") {
+		f := strings.Fields(line)
+		if len(f) < 2 || !strings.HasPrefix(f[0], "/") {
+			continue
+		}
+		ctx := f[len(f)-1]
+		parts := strings.Split(ctx, ":")
+		if len(parts) < 3 {
+			continue
+		}
+		if ours[parts[2]] {
+			continue // our own module's entry (or an earlier hardener module's)
+		}
+		stem := fcLiteralStem(f[0])
+		if stem == "" {
+			continue
+		}
+		for root := range roots {
+			// STRICTLY under: an exact match is the collision case (handled
+			// separately) and an ancestor cannot be more specific than our root.
+			if strings.HasPrefix(stem, root+"/") {
+				return fmt.Errorf(
+					"base policy rule %q (type %s) applies under declared root %s — files created there would receive %s instead of the app type, and the descendant scan cannot see them while the path is empty; declare a narrower path or exclude that subtree",
+					f[0], parts[2], root, parts[2])
+			}
+		}
+	}
+	return nil
 }
 
 // fcLiteralStem reduces an EXTERNAL file-contexts regex (a row from `semanage
