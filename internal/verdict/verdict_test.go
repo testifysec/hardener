@@ -249,3 +249,42 @@ func TestPassingVerdictValidatesObservedEntrypoints(t *testing.T) {
 		t.Errorf("a failing verdict must still serialize: %v", err)
 	}
 }
+
+// The install-time measurement must be SIGNED evidence, not just an internal
+// gate. A consumer reading the statement should be able to see that the package
+// was actually installed in the chamber and proven to apply the policy — the
+// other gates only ever describe the policy itself.
+func TestPredicateCarriesPackageMeasurement(t *testing.T) {
+	r := passingResult()
+	r.PackageOK = true
+	r.PackageChecks = []pipeline.PackageCheck{
+		{Name: "rpm install", Passed: true},
+		{Name: "module installed at priority 200", Passed: true},
+		{Name: "entrypoint labeled widget_exec_t: /usr/sbin/widgetd", Passed: true},
+		{Name: "entrypoint label restored after erase: /usr/sbin/widgetd", Passed: true},
+	}
+	st := Build(r, Env{Mode: "Enforcing"}, nil)
+	g := st.Predicate.Gates
+	if !g.PackageVerified {
+		t.Error("packageVerified must be true when the package was proven")
+	}
+	if len(g.PackageChecks) != 4 {
+		t.Fatalf("package checks = %d, want 4", len(g.PackageChecks))
+	}
+	// It must survive serialization under the documented key.
+	raw, err := json.Marshal(st)
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, want := range []string{`"packageVerified":true`, `"packageChecks"`, "module installed at priority 200"} {
+		if !strings.Contains(string(raw), want) {
+			t.Errorf("wire format missing %q", want)
+		}
+	}
+
+	// A run that never packaged (no RPM) must not claim the gate.
+	plain := passingResult()
+	if Build(plain, Env{}, nil).Predicate.Gates.PackageVerified {
+		t.Error("packageVerified must be false when no package was verified")
+	}
+}

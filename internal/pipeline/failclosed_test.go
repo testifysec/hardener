@@ -26,6 +26,12 @@ func passingRunner() *fakeRunner {
 		"sesearch -A -s init_t":     "allow init_t bin_t:file execute;",
 		"sha256sum":                 "abababababababababababababababababababababababababababababababab  /home/u/rpmbuild/RPMS/noarch/widget-selinux-1.0.0-1.el9.noarch.rpm",
 		"rpmbuild -bb":              "Processing files...\nWrote: /home/u/rpmbuild/RPMS/noarch/widget-selinux-1.0.0-1.el9.noarch.rpm",
+		// Package verification INSTALLS the built RPM in the chamber, then erases it.
+		// The module lands at the third-party priority; the entrypoint carries the app
+		// exec type while installed and reverts to a base type afterwards.
+		"semodule --list-modules=full":              "100 selinux-policy pp\n200 widget            pp",
+		"stat -c '%C' -- '/opt/widget/bin/widgetd'": "unconfined_u:object_r:widget_exec_t:s0",
+		"ls -Zd": "system_u:object_r:bin_t:s0 /opt/widget/bin/widgetd",
 	}}
 }
 

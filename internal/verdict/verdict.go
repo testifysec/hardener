@@ -85,9 +85,17 @@ type Gates struct {
 	// predicate advertised "exercised under enforcement" for a policy that never
 	// reached a verified enforcing state (review finding — round 68). Both inputs
 	// are now serialized separately as well, so a consumer can tell the two apart.
-	ExerciseEnforcing  bool          `json:"exerciseEnforcing"`
-	ExerciseSucceeded  bool          `json:"exerciseSucceeded"`
-	EnforcementProven  bool          `json:"enforcementProven"`
+	ExerciseEnforcing bool `json:"exerciseEnforcing"`
+	ExerciseSucceeded bool `json:"exerciseSucceeded"`
+	EnforcementProven bool `json:"enforcementProven"`
+	// PackageVerified means the built RPM was actually INSTALLED in the chamber,
+	// proven to deliver the confinement described here, then erased and proven to
+	// clean up. The other gates all describe the POLICY; this one describes the
+	// artifact that has to apply it on a host nobody can reach. A verdict can
+	// legitimately prove a policy confines a workload and still ship a package that
+	// fails to install — this closes that gap.
+	PackageVerified    bool          `json:"packageVerified"`
+	PackageChecks      []CheckResult `json:"packageChecks,omitempty"`
 	DomainProof        bool          `json:"domainProof"`
 	ResidualDenials    int           `json:"residualDenials"`
 	StaticChecks       []CheckResult `json:"staticChecks,omitempty"`
@@ -234,6 +242,8 @@ func BuildOrErr(res *pipeline.Result, env Env, extra []Subject) (Statement, erro
 			ExerciseEnforcing: res.ExerciseOK && res.EnforceOK,
 			ExerciseSucceeded: res.ExerciseOK,
 			EnforcementProven: res.EnforceOK,
+			PackageVerified:   res.PackageOK,
+			PackageChecks:     packageChecks(res),
 			DomainProof:       res.DomainOK,
 			ResidualDenials:   len(res.ResidualAVCs),
 		},
@@ -430,4 +440,19 @@ func failureOf(res *pipeline.Result) string {
 func sum(s string) string {
 	h := sha256.Sum256([]byte(s))
 	return hex.EncodeToString(h[:])
+}
+
+// packageChecks converts the install-time evidence into the wire shape. These are
+// signed alongside the policy claims: the statement should say not only "this
+// policy confines the app" but "this package was installed and proven to apply
+// it, and to remove it cleanly."
+func packageChecks(res *pipeline.Result) []CheckResult {
+	out := make([]CheckResult, 0, len(res.PackageChecks))
+	for _, c := range res.PackageChecks {
+		out = append(out, CheckResult{Name: c.Name, Passed: c.Passed, Detail: c.Detail})
+	}
+	if len(out) == 0 {
+		return nil
+	}
+	return out
 }
